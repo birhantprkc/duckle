@@ -1584,6 +1584,26 @@ impl DuckdbEngine {
         ));
         let _guard = TempDbGuard(db_path.clone());
 
+        // A `ctl.runjob` with returnsRows names a handoff parquet at plan time: the
+        // child writes it and the parent reads it through a lazy VIEW, so it has to
+        // outlive the stage and can only be removed once the run is over. Nothing
+        // removed it. The sweep in TempDbGuard keys on the run db's name, and this
+        // file is named before a run db exists, so every returnsRows call left one
+        // in the temp directory for good.
+        let _handoffs = TempFilesGuard(
+            compiled
+                .stages
+                .iter()
+                .filter_map(|s| match s.runtime.as_ref() {
+                    Some(RuntimeSpec::RunJob { vars, .. }) => vars
+                        .iter()
+                        .find(|(k, _)| k == "DUCKLE_RETURN")
+                        .map(|(_, v)| PathBuf::from(v)),
+                    _ => None,
+                })
+                .collect(),
+        );
+
         // Asking the run database what it has set costs a process, and a call or a loop
         // is where that would be paid. A pipeline that sets nothing has nothing to
         // answer with, so it is not asked - which keeps every pipeline that does not use
@@ -4131,6 +4151,18 @@ impl Drop for TempDbGuard {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Removes temp files a run named for itself, at the end of the run. For files
+/// the `<db>.*.parquet` sweep above cannot see because their name is fixed
+/// before the run db exists: the ctl.runjob handoff parquet is one.
+struct TempFilesGuard(Vec<PathBuf>);
+impl Drop for TempFilesGuard {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
         }
     }
 }

@@ -12896,6 +12896,78 @@ fn runjob_passes_context_vars_to_child() {
 }
 
 #[test]
+fn a_runjob_handoff_file_does_not_outlive_its_run() {
+    // The handoff parquet is a temp file the parent names, the child writes and
+    // the parent reads through a lazy VIEW - so it has to survive the stage, and
+    // nothing removed it when the run ended. A scheduled pipeline calling a child
+    // with returnsRows left one behind on every single run: the name is known only
+    // to the run that made it, and no sweep matches `duckle-return-*`.
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id,name\n1,alice\n2,bob\n");
+    let child_val = json!({
+        "nodes": [
+            node("cs", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("ck", "snk.parquet", json!({ "path": "${DUCKLE_RETURN}", "mode": "overwrite" })),
+        ],
+        "edges": [ main_edge("ce", "cs", "ck") ]
+    });
+    let child_path = write_file(
+        tmp.path(),
+        "child.json",
+        &serde_json::to_string(&child_val).unwrap(),
+    );
+
+    // The handoff name carries the node id, so this lists only this test's files
+    // however many other runs are in flight in the same process.
+    let handoffs = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().ends_with("-rjhandoffleak.parquet"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // A previous failing run of this test would otherwise fail every later one.
+    for p in handoffs() {
+        let _ = std::fs::remove_file(p);
+    }
+
+    let engine = engine_or_skip!();
+    let out = out_path(tmp.path(), "parent_out.csv");
+    let parent = doc(
+        json!([
+            node(
+                "rjhandoffleak",
+                "ctl.runjob",
+                json!({ "pipelineRef": child_path, "returnsRows": true })
+            ),
+            node("snk", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "rjhandoffleak", "snk")]),
+    );
+    let result = engine.execute_pipeline(&parent);
+    assert_eq!(result.status, "ok", "runjob failed: {:?}", result.error);
+    assert_eq!(
+        count(&format!("read_csv_auto('{}')", out)),
+        2,
+        "the parent should still see the rows its child returned"
+    );
+    let left = handoffs();
+    assert!(
+        left.is_empty(),
+        "the handoff parquet outlived the run: {:?}",
+        left
+    );
+}
+
+#[test]
 fn runjob_reads_the_rows_its_child_returns() {
     // A child normally runs for its side effects and hands nothing back, so a parent that
     // wanted the child's rows got an empty relation. With returnsRows the parent names a
