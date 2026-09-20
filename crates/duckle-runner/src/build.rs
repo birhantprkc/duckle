@@ -548,6 +548,13 @@ pub fn run() -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&staging);
     }
     std::fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {}", staging.display(), e))?;
+    // Bound to a guard here rather than removed at the end, because everything
+    // between this line and the artifact is fallible - the duckdb probe, the
+    // contexts, the leak guards, the stub - and a build that failed used to keep
+    // the whole staged tree, duckdb binary included, in the temp directory for
+    // good. Nothing sweeps `duckle-build-*`, and a build is something an
+    // operator retries.
+    let _staging = StagingDir(staging.clone());
     let root = &staging;
 
     // 3. Redaction (resolve FIRST, redact SECOND).
@@ -771,10 +778,19 @@ pub fn run() -> Result<(), String> {
             .map_err(|e| format!("mkdir {}: {}", parent.display(), e))?;
     }
     crate::selfextract::write_artifact(&stub, &payload, out_file)?;
-    let _ = std::fs::remove_dir_all(root);
 
     eprintln!("duckle-runner build: wrote {}", out_file.display());
     Ok(())
+}
+
+/// Removes the staging tree when the build returns, by whichever of its
+/// two dozen exits it takes.
+struct StagingDir(PathBuf);
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Resolve the stub runner bytes to prepend to the artifact. With --stub,
