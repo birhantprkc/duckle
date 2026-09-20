@@ -9496,6 +9496,43 @@ fn src_xml_walks_row_path_and_emits_matches_as_rows() {
     assert!(raw.contains("Foundation"), "expected Foundation");
 }
 
+/// A NaN in the data cannot make a sink report success having written nothing.
+///
+/// DuckDB's CLI prints a non-finite double as the bare token `NaN`, which is not
+/// JSON, and the row bridge every non-SQL sink uses read that as "no rows". So a
+/// pandas-exported CSV - `NaN` is exactly what `to_csv` writes for a missing
+/// float - went in with three rows and came out as an empty file, on a green run
+/// with exit code 0. Two sinks amplify it into data loss: the Oracle truncate
+/// path and the MongoDB replace path clear the target first and write the empty
+/// result afterwards.
+#[test]
+fn a_non_finite_number_fails_the_stage_rather_than_writing_nothing() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    // Exactly what pandas `to_csv` writes for a missing float.
+    let csv = write_file(tmp.path(), "in.csv", "id,v\n1,1.5\n2,NaN\n3,inf\n");
+    let xml_path = out_path(tmp.path(), "out.xml");
+
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("x", "snk.xml", json!({ "path": xml_path })),
+        ]),
+        json!([main_edge("e1", "s", "x")]),
+    ));
+
+    assert_eq!(
+        r.status, "error",
+        "a result the bridge cannot carry must fail, not write an empty file: {:?}",
+        r
+    );
+    let err = r.error.clone().unwrap_or_default();
+    assert!(
+        err.contains("non-finite"),
+        "and it has to name the cause: {err}"
+    );
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.

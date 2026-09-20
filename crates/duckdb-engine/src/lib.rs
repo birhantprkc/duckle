@@ -781,7 +781,14 @@ impl DuckdbEngine {
 
     fn run_rows(&self, db: Option<&Path>, sql: &str) -> Result<Vec<JsonValue>, EngineError> {
         let out = self.run(db, sql, true)?;
-        Ok(parse_json_arrays(&out).into_iter().next().unwrap_or_default())
+        // Checked, because these rows are the ones a sink writes: 26 sink
+        // executors reach their target through here, and an unreadable result
+        // that came back as "no rows" made every one of them report success
+        // having written nothing.
+        match parse_json_arrays_checked(&out) {
+            Ok(arrays) => Ok(arrays.into_iter().next().unwrap_or_default()),
+            Err((_, reason)) => Err(json_bridge_failure(&reason, &out)),
+        }
     }
 
     /// The run variables set so far, as text, for passing into a child job.
@@ -4091,7 +4098,8 @@ impl DuckdbEngine {
         let s = sql.trim().trim_end_matches(';').trim();
         let combined = format!("DESCRIBE ({s}); SELECT * FROM ({s}) LIMIT {row_limit};");
         let out = self.run(None, &combined, true)?;
-        let arrays = parse_json_arrays(&out);
+        let arrays = parse_json_arrays_checked(&out)
+            .map_err(|(_, reason)| json_bridge_failure(&reason, &out))?;
         let columns = arrays
             .first()
             .map(|rows| rows.iter().filter_map(parse_describe_row).collect())
@@ -4108,7 +4116,8 @@ impl DuckdbEngine {
         let s = sql.trim().trim_end_matches(';').trim();
         let combined = format!("DESCRIBE ({s}); SELECT * FROM ({s}) LIMIT {row_limit};");
         let out = self.run(Some(db), &combined, true)?;
-        let arrays = parse_json_arrays(&out);
+        let arrays = parse_json_arrays_checked(&out)
+            .map_err(|(_, reason)| json_bridge_failure(&reason, &out))?;
         let columns = arrays
             .first()
             .map(|rows| rows.iter().filter_map(parse_describe_row).collect())
@@ -5713,6 +5722,45 @@ fn cql_value_to_json(v: &scylla::value::CqlValue) -> JsonValue {
 }
 
 #[cfg(test)]
+mod json_bridge_tests {
+    use super::{json_bridge_failure, parse_json_arrays, parse_json_arrays_checked};
+
+    /// The CLI prints a non-finite double as a bare `NaN` token, and the row
+    /// bridge used to read that as "no rows".
+    ///
+    /// Verified against the pinned binary:
+    /// `duckdb -json -c "SELECT 1 AS id, 'nan'::DOUBLE AS v"` prints
+    /// `[{"id":1,"v":NaN}]`, which no JSON reader accepts.
+    #[test]
+    fn a_bare_nan_is_reported_rather_than_read_as_no_rows() {
+        let out = "[{\"id\":1,\"v\":NaN},\n{\"id\":2,\"v\":Infinity}]";
+        let err = parse_json_arrays_checked(out).expect_err("this is not JSON");
+        assert!(err.0.is_empty(), "nothing was read: {:?}", err.0);
+        let msg = json_bridge_failure(&err.1, out).to_string();
+        assert!(msg.contains("non-finite"), "{msg}");
+        assert!(msg.contains("isfinite"), "the message has to say what to do: {msg}");
+    }
+
+    #[test]
+    fn ordinary_output_still_parses_including_several_statements() {
+        let out = "[{\"a\":1}]\n[{\"b\":2},{\"b\":3}]";
+        let arrays = parse_json_arrays_checked(out).expect("valid JSON");
+        assert_eq!(arrays.len(), 2);
+        assert_eq!(arrays[1].len(), 2);
+        assert!(parse_json_arrays_checked("").expect("empty is not a failure").is_empty());
+    }
+
+    /// The lenient wrapper keeps exactly its old behaviour, because a preview
+    /// and a suggestion list are better off ignoring junk on the end.
+    #[test]
+    fn the_lenient_parser_still_returns_what_it_read() {
+        let out = "[{\"a\":1}]\nnot json at all";
+        let arrays = parse_json_arrays(out);
+        assert_eq!(arrays.len(), 1, "the good array survives: {arrays:?}");
+    }
+}
+
+#[cfg(test)]
 mod snowflake_jwt_tests {
     use super::snowflake_jwt_account;
 
@@ -6266,10 +6314,31 @@ fn is_local_path(p: &str) -> bool {
 
 /// Parse the (possibly multiple) top-level JSON arrays the DuckDB CLI
 /// prints in `-json` mode.
+///
+/// Lenient: output that stops parsing part way yields what was read so far.
+/// That is right for a preview or a suggestion list, where junk on the end is
+/// worth ignoring, and WRONG for the rows a sink is about to write - which is
+/// why anything carrying data uses [`parse_json_arrays_checked`].
 fn parse_json_arrays(s: &str) -> Vec<Vec<JsonValue>> {
+    parse_json_arrays_checked(s).unwrap_or_else(|(arrays, _)| arrays)
+}
+
+/// The same parse, but saying so when the output was not JSON.
+///
+/// The CLI prints a non-finite double as the bare token `NaN` or `Infinity`,
+/// which no JSON reader accepts. Swallowing that failure turned one such value
+/// anywhere in a result into ZERO rows for the caller, and a sink that writes
+/// zero rows and returns Ok reports a green run having written nothing at all -
+/// over a target it may just have cleared. Louder is the only safe direction:
+/// the rows either arrive or the stage fails.
+///
+/// On failure, returns the arrays read before the failure alongside the reason,
+/// so the lenient wrapper keeps its old behaviour exactly.
+#[allow(clippy::type_complexity)]
+fn parse_json_arrays_checked(s: &str) -> Result<Vec<Vec<JsonValue>>, (Vec<Vec<JsonValue>>, String)> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut out = Vec::new();
     let stream = serde_json::Deserializer::from_str(trimmed).into_iter::<JsonValue>();
@@ -6277,10 +6346,25 @@ fn parse_json_arrays(s: &str) -> Vec<Vec<JsonValue>> {
         match value {
             Ok(JsonValue::Array(a)) => out.push(a),
             Ok(_) => {}
-            Err(_) => break,
+            Err(e) => return Err((out, e.to_string())),
         }
     }
-    out
+    Ok(out)
+}
+
+/// Why the CLI output did not parse, in terms the author can act on.
+fn json_bridge_failure(reason: &str, raw: &str) -> EngineError {
+    // Named specifically when it is the known cause, because the generic
+    // message would send the reader looking for a bug in their own data.
+    if raw.contains("NaN") || raw.contains("Infinity") || raw.contains("-Infinity") {
+        return EngineError::Query(format!(
+            "the result contains a non-finite number (NaN or Infinity), which DuckDB prints \
+             as a bare token that is not valid JSON, so the rows cannot be carried to this \
+             node. Replace them upstream - for example `CASE WHEN isfinite(x) THEN x END` in \
+             a Select or Custom SQL node - or cast the column to VARCHAR. ({reason})"
+        ));
+    }
+    EngineError::Query(format!("the DuckDB output could not be read as JSON: {reason}"))
 }
 
 /// Turn one DuckDB `DESCRIBE` row into a Column.
