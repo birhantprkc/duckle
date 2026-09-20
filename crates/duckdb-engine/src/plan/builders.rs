@@ -5627,9 +5627,42 @@ fn json_read_extra_args(props: &JsonValue) -> String {
     extra
 }
 
+/// `format='array'` for a JSON array that begins with a byte order mark.
+///
+/// DuckDB's shape sniff does not see past a BOM, so a BOM'd top-level array -
+/// what PowerShell 5.1 `Out-File -Encoding utf8`, Notepad and a good deal of
+/// .NET produce - came back as ONE row holding the whole document in a single
+/// `json` column, on a green run. Naming the format reads it correctly.
+///
+/// Deliberately narrow, all measured on the pinned 1.5.4 CLI:
+/// - BOM + array, auto            -> one `json` column (the bug)
+/// - BOM + array, format='array'  -> correct
+/// - BOM + NDJSON, auto           -> correct already
+/// - BOM + NDJSON, explicit format-> "byte order mark (BOM) is not supported"
+///
+/// So an array is the only shape worth naming, and only when the author has not
+/// named one. A remote path simply fails to open, which is the right answer: a
+/// BOM cannot be sniffed without fetching the object, and the read is what
+/// fetches it.
+fn bom_json_array_format(path: &str, props: &JsonValue) -> Option<&'static str> {
+    let named = string_prop(props, "format").unwrap_or_default();
+    if !matches!(named.trim().to_ascii_lowercase().as_str(), "" | "auto") {
+        return None;
+    }
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let n = std::fs::File::open(path).ok()?.read(&mut head).ok()?;
+    let rest = head[..n].strip_prefix(&[0xEF, 0xBB, 0xBF])?;
+    let first = rest.iter().find(|b| !b.is_ascii_whitespace())?;
+    (*first == b'[').then_some("array")
+}
+
 pub(crate) fn build_json_source(props: &JsonValue) -> String {
     let path = string_prop(props, "path").unwrap_or_default();
-    let extra = json_read_extra_args(props);
+    let mut extra = json_read_extra_args(props);
+    if let Some(fmt) = bom_json_array_format(&path, props) {
+        extra.push_str(&format!(", format='{}'", fmt));
+    }
     // recordsPath: a dotted key path to the array of records inside the JSON
     // (e.g. a REST envelope like {"data":[...]} or {"response":{"records":[...]}}).
     // When set, walk to that array and unnest + recursively flatten each record

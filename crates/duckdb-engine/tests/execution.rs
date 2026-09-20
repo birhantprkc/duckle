@@ -9533,6 +9533,41 @@ fn a_non_finite_number_fails_the_stage_rather_than_writing_nothing() {
     );
 }
 
+/// A JSON array written with a byte order mark still reads as rows.
+///
+/// PowerShell 5.1 `Out-File -Encoding utf8`, Notepad and much of .NET write one.
+/// DuckDB's shape sniff does not see past it, so the whole document came back as
+/// a single row in one `json` column and the sink wrote that stringified blob -
+/// a green run, "ok (1 rows)", and a load that replaced the target with junk.
+#[test]
+fn a_json_array_with_a_byte_order_mark_still_reads_as_rows() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("bom.json");
+    std::fs::write(&src, b"\xef\xbb\xbf[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"}]").unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.json", json!({ "path": src.to_string_lossy() })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    assert_eq!(r.status, "ok", "run failed: {:?}", r.error);
+
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        written.starts_with("id,name"),
+        "the columns have to survive the BOM, not collapse into one `json` column: {written:?}"
+    );
+    assert_eq!(
+        count(&format!("read_csv_auto('{}')", out)),
+        2,
+        "both rows have to arrive: {written:?}"
+    );
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.

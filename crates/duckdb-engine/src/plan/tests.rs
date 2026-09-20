@@ -960,6 +960,38 @@
     }
 
     #[test]
+    fn a_bom_on_a_json_array_is_read_as_an_array() {
+        // Measured on the pinned CLI: `read_json_auto` over a BOM'd array gives
+        // ONE row with a single `json` column, and `format='array'` gives the
+        // rows. The sniff is what the BOM defeats, so the format is named.
+        let dir = tempfile::tempdir().unwrap();
+        let with_bom = dir.path().join("bom.json");
+        std::fs::write(&with_bom, b"\xef\xbb\xbf[{\"id\":1}]").unwrap();
+        let plain = dir.path().join("plain.json");
+        std::fs::write(&plain, b"[{\"id\":1}]").unwrap();
+        let ndjson = dir.path().join("bom.ndjson");
+        std::fs::write(&ndjson, b"\xef\xbb\xbf{\"id\":1}\n").unwrap();
+
+        let props = |p: &std::path::Path| serde_json::json!({ "path": p.to_string_lossy() });
+        let sql = crate::plan::builders::build_json_source(&props(&with_bom));
+        assert!(sql.contains("format='array'"), "{sql}");
+
+        // Nothing else changes: no BOM, and DuckDB's own sniff is right.
+        let sql = crate::plan::builders::build_json_source(&props(&plain));
+        assert!(!sql.contains("format="), "{sql}");
+        // A BOM'd NDJSON reads correctly under auto and FAILS under an explicit
+        // format, so it must be left alone.
+        let sql = crate::plan::builders::build_json_source(&props(&ndjson));
+        assert!(!sql.contains("format="), "{sql}");
+        // And an author who named a format keeps it.
+        let mut named = props(&with_bom);
+        named["format"] = serde_json::json!("jsonl");
+        let sql = crate::plan::builders::build_json_source(&named);
+        assert!(sql.contains("format='newline_delimited'"), "{sql}");
+        assert_eq!(sql.matches("format=").count(), 1, "{sql}");
+    }
+
+    #[test]
     fn a_relational_truncate_sink_clears_only_when_rows_arrived() {
         // Same rule as the DuckDB-attached sinks, and the same reason: a run
         // that produced nothing must leave the target alone rather than empty it
