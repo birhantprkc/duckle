@@ -9568,6 +9568,53 @@ fn a_json_array_with_a_byte_order_mark_still_reads_as_rows() {
     );
 }
 
+/// A node's memory limit applies to the node that carries it.
+///
+/// With one downstream consumer the stage compiled to a VIEW, so the PRAGMA
+/// wrapped a CREATE VIEW that computes nothing and the work ran inside the
+/// CONSUMER's query, under the consumer's (unset) limit. The cap did nothing at
+/// all - and the author paid for it twice, because setting it also drops the
+/// whole pipeline off the batched path.
+///
+/// `current_setting` is the measurement rather than an OOM, because it is exact:
+/// the default is the machine's, and the cap is what was asked for.
+#[test]
+fn a_nodes_memory_limit_applies_to_that_node() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n");
+    let out = out_path(tmp.path(), "limit.csv");
+
+    let d = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node(
+                "q",
+                "code.sql",
+                json!({
+                    "sql": "SELECT current_setting('memory_limit') AS ml FROM input",
+                    // One consumer below, which is the shape that used to ignore this.
+                    "memoryLimitMb": 512
+                }),
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "q"), main_edge("e2", "q", "k")]),
+    );
+    let r = engine.execute_pipeline(&d);
+    assert_eq!(r.status, "ok", "run failed: {:?}", r.error);
+
+    let written = std::fs::read_to_string(&out).unwrap();
+    let value = written.lines().nth(1).unwrap_or_default().trim().to_string();
+    // DuckDB reports it as e.g. "488.2 MiB"; the default on any machine that can
+    // run this suite is GiB. The unit is the assertion.
+    assert!(
+        value.contains("MiB"),
+        "the stage ran without the limit it carries (memory_limit = {value}), so the \
+         setting named nothing"
+    );
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.
@@ -12987,7 +13034,9 @@ fn an_empty_json_file_is_named_rather_than_the_transform_below_it() {
     // Exactly what a run that filtered everything out leaves behind.
     let empty = write_file(tmp.path(), "yesterday.jsonl", "");
 
-    for memory_limit in [None, Some(128)] {
+    // 1024 rather than a token value: the limit is now applied to the stage that
+    // carries it, and read_json_auto's 100 MB object cap needs room to allocate.
+    for memory_limit in [None, Some(1024)] {
         let mut src = serde_json::json!({ "path": empty, "format": "newline_delimited" });
         if let Some(mb) = memory_limit {
             src["memoryLimitMb"] = serde_json::json!(mb);

@@ -6676,8 +6676,28 @@ fn build_stage(
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
         let forced_view = force_views || materialize == "view";
+        // A stage that carries a resource or failure setting has to be the stage
+        // that does the work, or the setting names nothing.
+        //
+        // With one consumer the stage compiled to a VIEW, which computes nothing:
+        // the PRAGMA wrapped a CREATE VIEW that always succeeds, the work was
+        // inlined into the CONSUMER's query and ran under the consumer's limits,
+        // the node's retries never fired because the node never failed, its
+        // failure was reported against the node below it, and that node's
+        // continueOnFailure decided whether the run carried on. Measured: the
+        // same node with `memoryLimitMb: 1` passed with one consumer and hit
+        // "Out of Memory Error" with two, and a `current_setting('memory_limit')`
+        // probe returned the 18.7 GiB default with one consumer and 488 MiB with
+        // two. Materializing is what makes the setting mean what it says.
+        //
+        // Not when views are forced: that is the analysis compile, which binds
+        // schemas without running the work, and an author who asked for a view
+        // outright has said which they want.
+        let stage_owns_its_work =
+            memory_limit_mb.is_some() || retry_attempts > 1 || continue_on_failure;
         let forced_table =
-            matches!(materialize, "table" | "memory" | "disk" | "duckdb" | "duckdbfile");
+            matches!(materialize, "table" | "memory" | "disk" | "duckdb" | "duckdbfile")
+                || (stage_owns_its_work && !forced_view);
         let view_ok = |consumers: usize| {
             !uses_dynamic_pivot
                 && !attach_backed
