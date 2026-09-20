@@ -6013,6 +6013,17 @@ fn mssql_attach(props: &JsonValue) -> String {
     if let Some(p) = string_prop(props, "password").filter(|s| !s.is_empty()) {
         parts.push(format!("password={}", p));
     }
+    // #357: carry "Encrypt connection" into the bulk path too. It was read only
+    // where the tiberius driver builds its config, and `bulk` defaults to true,
+    // so on the sink's own default path the control did nothing: a user on SQL
+    // Server 2014 followed the field's advice, unchecked it, and still failed the
+    // handshake unless they also unchecked "Bulk write", which nothing said.
+    //
+    // Stated in both directions rather than only when off. The extension has its
+    // own default and the form claims one, and a connection string that says what
+    // the form says is the only version of this that cannot drift apart from it.
+    let encrypt = props.get("encrypt").and_then(|v| v.as_bool()).unwrap_or(true);
+    parts.push(format!("encrypt={}", encrypt));
     // #86 follow-up: honour the same "Trust TLS cert" toggle as the legacy
     // driver (default off). When off we omit the key so the extension validates
     // the cert / lets an older non-TLS server negotiate plainly; when on we trust

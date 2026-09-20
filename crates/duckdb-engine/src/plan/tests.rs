@@ -960,6 +960,39 @@
     }
 
     #[test]
+    fn sqlserver_bulk_carries_the_encrypt_toggle() {
+        // #357: "Encrypt connection" was read only on the tiberius driver path,
+        // and `bulk` defaults to true, so on the sink's default path the control
+        // did nothing: a user on SQL Server 2014 followed the field's own advice,
+        // unchecked it, and still failed the handshake unless they also unchecked
+        // "Bulk write", which nothing told them.
+        //
+        // The value is always stated rather than only when false. The extension
+        // has its own default and the form claims one; a connection string that
+        // says what the form says is the only version of this that cannot drift.
+        let mk = |extra: &str| pipeline_from_json(&format!(
+            r#"{{"nodes":[
+                {{"id":"s","position":{{"x":0,"y":0}},"data":{{"label":"S","componentId":"src.csv","properties":{{"path":"/tmp/in.csv"}}}}}},
+                {{"id":"k","position":{{"x":0,"y":0}},"data":{{"label":"M","componentId":"snk.sqlserver","properties":{{"host":"h","database":"db","user":"u","password":"p","tableName":"t"{}}}}}}}
+              ],"edges":[{{"id":"e1","source":"s","target":"k","data":{{"connectionType":"main"}}}}]}}"#, extra));
+        let sql = |extra: &str| {
+            let c = compile(&mk(extra)).unwrap();
+            c.stages.iter().find(|s| s.node_id == "k").unwrap().sql.clone()
+        };
+        // Absent means on, the same default the driver path applies.
+        assert!(
+            sql("").contains("encrypt=true"),
+            "the bulk ATTACH must state the encryption the form claims: {}",
+            sql("")
+        );
+        assert!(sql(r#","encrypt":true"#).contains("encrypt=true"));
+        // Unchecked reaches the extension, which is the whole point.
+        let off = sql(r#","encrypt":false"#);
+        assert!(off.contains("encrypt=false"), "unchecking Encrypt must reach the bulk path: {off}");
+        assert!(!off.contains("encrypt=true"), "{off}");
+    }
+
+    #[test]
     fn partial_run_keeps_attach_source_materialized() {
         // #87: "Run from here" (compile_partial) must NOT upgrade an attach-backed
         // source to a live VIEW. Partial runs execute per-stage in separate
