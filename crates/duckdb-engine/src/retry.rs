@@ -550,6 +550,28 @@ fn is_running(path: &Path) -> bool {
         .is_some_and(|r| r.state == RUNNING)
 }
 
+/// Is this receipt one that has positively FINISHED?
+///
+/// [`prune`] deletes what this says yes to, so the burden of proof sits here: a
+/// receipt that cannot be read AT THIS MOMENT is not evidence of a finished run.
+/// It used to be - the question was asked the other way round, "is it running",
+/// with anything unreadable answering no - and that hands an in-flight run's
+/// receipt to the deleter for the duration of any window in which the file
+/// cannot be read. On Windows there is such a window on every write: replacing
+/// the file is a MoveFileEx, and a reader in that instant gets NotFound. Under a
+/// loaded suite this machine measured 884 such reads out of 2776.
+///
+/// The cost is that a genuinely corrupt receipt is now kept rather than pruned.
+/// That is the right way round: a corrupt file is a bounded amount of disk, and
+/// the thing on the other side of the trade is the record of a run that is still
+/// going - which is what this whole file exists to keep.
+fn is_finished(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<RunReceipt>(&t).ok())
+        .is_some_and(|r| r.state != RUNNING)
+}
+
 /// Keep the newest [`MAX_RECEIPTS`] FINISHED receipts, and anything a durable
 /// record still names. Best-effort: failing to prune must never fail a run.
 ///
@@ -580,7 +602,10 @@ fn prune(workspace: &Path, d: &Path) {
             // delete it out from under itself. On a busy workspace that is a
             // multi-hour backfill losing exactly the in-flight record this
             // exists to keep.
-            .filter(|(_, p)| !is_running(p))
+            //
+            // Asked as "is it finished", not "is it not running": only a receipt
+            // this has READ and found finished may be deleted. See `is_finished`.
+            .filter(|(_, p)| is_finished(p))
             // And not one a publication or delivery still names.
             .filter(|(_, p)| {
                 let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1005,58 +1030,89 @@ pub fn plan(
 mod tests {
     use super::*;
 
-    /// A receipt is never read half written.
+    /// A receipt is written whole, not over the top of the old one.
     ///
     /// `write` truncated the file in place, and `prune` runs on EVERY receipt
-    /// write and asks `is_running` about every OTHER receipt in the workspace.
-    /// `is_running` treats an unreadable receipt as not running, on purpose, so
-    /// a reader that caught a truncating write mid-flight concluded that a
-    /// multi-hour backfill had finished - and, its mtime being old by
-    /// definition, pruned exactly the in-flight record that filter exists to
-    /// keep. `duckle retry <id>` then reports no receipt for a run still going.
+    /// write and asks about every OTHER receipt in the workspace. An unreadable
+    /// receipt counts as not running, on purpose, so a reader that caught a
+    /// write mid-flight concluded a multi-hour backfill had finished and pruned
+    /// it - its mtime being old by definition, which is the case that filter
+    /// exists for. `duckle retry <id>` then reports no receipt for a live run.
+    ///
+    /// Proven through an open handle rather than a racing thread: a handle on
+    /// the old file keeps reading the old file across a rename, and sees the new
+    /// bytes (or a truncated file) across an in-place write. That is the
+    /// difference, stated without a timing window - and without the heavy
+    /// concurrent I/O that a spin-loop version puts on the whole test binary.
     #[test]
-    fn a_receipt_is_never_read_half_written() {
+    fn a_receipt_is_written_whole_rather_than_over_the_old_one() {
+        use std::io::Read;
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().to_path_buf();
-        // Large enough that a truncating write is observable while it happens;
-        // a real receipt carries node records and reaches this size easily.
-        let mut r = begin(&ws, "run-torn", "scheduled", "orders", "pipelines/orders.json", "h", None);
-        r.pipeline_name = "x".repeat(200_000);
+        let mut r = begin(&ws, "run-atomic", "scheduled", "orders", "pipelines/orders.json", "h", None);
+        r.pipeline_name = "first".into();
         write(&ws, &r).unwrap();
 
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer = {
-            let (ws, r, stop) = (ws.clone(), r.clone(), stop.clone());
-            std::thread::spawn(move || {
-                for _ in 0..200 {
-                    let _ = write(&ws, &r);
-                }
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            })
-        };
+        // Opened BEFORE the second write, and held across it.
+        let mut held = std::fs::File::open(path_for(&ws, "run-atomic")).unwrap();
 
-        let mut torn = 0;
-        let mut reads = 0;
-        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-            reads += 1;
-            match load(&ws, "run-torn") {
-                Ok(_) => {}
-                // NotFound is a different question and cannot happen here: the
-                // receipt was written before the writer started.
-                Err(e) => {
-                    torn += 1;
-                    if torn == 1 {
-                        eprintln!("first torn read: {e:?}");
-                    }
-                }
-            }
+        r.pipeline_name = "second".into();
+        write(&ws, &r).unwrap();
+
+        let mut seen = String::new();
+        held.read_to_string(&mut seen).unwrap();
+        assert!(
+            seen.contains("first"),
+            "the write went over the top of the file a reader already had open, so a \
+             reader mid-write sees a partial receipt: {}",
+            &seen[..seen.len().min(120)]
+        );
+        // And the new version is the one on disk.
+        assert_eq!(load(&ws, "run-atomic").unwrap().pipeline_name, "second");
+        // No temp file left behind.
+        let leftovers: Vec<String> = std::fs::read_dir(dir(&ws))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    /// Prune deletes only what it has read and found finished.
+    ///
+    /// It used to delete anything that did not READ as running, so a receipt
+    /// that could not be read at that instant - a half-written file before the
+    /// write became atomic, or the Windows rename window that replaces it - was
+    /// handed to the deleter. The run it belonged to was still going.
+    #[test]
+    fn prune_keeps_a_receipt_it_could_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+
+        // Oldest first, so under the old rule this is the one deletion made.
+        let unreadable = dir(&ws);
+        std::fs::create_dir_all(&unreadable).unwrap();
+        let corrupt = unreadable.join("run-corrupt.json");
+        std::fs::write(&corrupt, "{ this is not a receipt").unwrap();
+
+        // Exactly MAX_RECEIPTS finished ones, so the corrupt file is the only
+        // thing that can take the count over the limit.
+        for i in 0..MAX_RECEIPTS {
+            let mut r = begin(&ws, &format!("run-{i:04}"), "manual", "p", "p.json", "h", None);
+            r.state = "success".into();
+            r.status = "success".into();
+            write(&ws, &r).unwrap();
         }
-        writer.join().unwrap();
-        assert!(reads > 0, "the reader never ran, so this proves nothing");
+
+        assert!(
+            corrupt.exists(),
+            "a receipt that could not be read was deleted, and the run it belongs to may still be going"
+        );
         assert_eq!(
-            torn, 0,
-            "{torn} of {reads} reads caught the receipt mid-write, and a torn receipt \
-             reads as a finished run that prune may delete"
+            load(&ws, "run-0000").map(|r| r.state),
+            Ok("success".to_string()),
+            "and the finished ones are still here, since nothing was over the limit"
         );
     }
 
