@@ -72,22 +72,59 @@ pub fn workspace_key(workspace: &Path, create: bool) -> Result<[u8; 32], String>
     }
     // Create the key file owner-only from the start; writing first and
     // chmod'ing after left a brief world-readable window (TOCTOU).
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| format!("create key: {}", e))?;
-        f.write_all(&k).map_err(|e| format!("write key: {}", e))?;
+    //
+    // create_new, not create: two processes reaching a fresh workspace together
+    // - the desktop saving a deploy target while `duckle serve` encrypts a
+    // connection - each found no key, each generated one, each wrote the same
+    // path, and each RETURNED ITS OWN. One key survived on disk and whatever the
+    // other had sealed became an `enc:v2:` blob that no key in the workspace
+    // opens, surfacing much later as an auth failure. The first writer is now
+    // authoritative and the loser adopts what is on disk, which is what this
+    // function's own rule - "a missing key is an error rather than minting a
+    // wrong key" - asks for.
+    let created = {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut f| f.write_all(&k))
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(&k))
+        }
+    };
+    match created {
+        Ok(()) => Ok(k),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Someone got there first. Theirs is the key every other process in
+            // this workspace will read, so this one uses it too.
+            let bytes = std::fs::read(&path).map_err(|e| format!("read key: {}", e))?;
+            if bytes.len() != 32 {
+                // Reported rather than replaced: a new key here would make every
+                // secret already sealed in this workspace unopenable, silently.
+                return Err(format!(
+                    "workspace key at {} is {} bytes, not 32",
+                    path.display(),
+                    bytes.len()
+                ));
+            }
+            let mut on_disk = [0u8; 32];
+            on_disk.copy_from_slice(&bytes);
+            Ok(on_disk)
+        }
+        Err(e) => Err(format!("create key: {}", e)),
     }
-    #[cfg(not(unix))]
-    std::fs::write(&path, k).map_err(|e| format!("write key: {}", e))?;
-    Ok(k)
 }
 
 pub fn is_encrypted(s: &str) -> bool {
@@ -680,6 +717,45 @@ mod tests {
         dir
     }
 
+
+    /// Every process that mints the workspace key at once ends up with the same
+    /// key.
+    ///
+    /// Each racer used to generate its own 32 bytes, write them over the same
+    /// path and return the copy it had generated rather than the one that
+    /// survived. Whatever the losers sealed was then unopenable by any key in
+    /// the workspace, and the failure surfaced later as a bad password.
+    #[test]
+    fn concurrent_minting_agrees_on_the_key_that_is_on_disk() {
+        let ws = temp_ws("mint_race");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+
+        const RACERS: usize = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(RACERS));
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let ws = ws.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    workspace_key(&ws, true).expect("mint or adopt")
+                })
+            })
+            .collect();
+        let keys: Vec<[u8; 32]> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let on_disk = std::fs::read(ws.join(".duckle").join("keys").join("secret.key")).unwrap();
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(
+                k.as_slice(),
+                on_disk.as_slice(),
+                "racer {i} kept a key that is not the one in the workspace, so everything \
+                 it sealed is unopenable"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 
     /// The property the binding exists for.
     ///
