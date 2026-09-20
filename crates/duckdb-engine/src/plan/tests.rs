@@ -960,6 +960,37 @@
     }
 
     #[test]
+    fn a_relational_truncate_sink_clears_only_when_rows_arrived() {
+        // Same rule as the DuckDB-attached sinks, and the same reason: a run
+        // that produced nothing must leave the target alone rather than empty it
+        // on the strength of an upstream that may simply have failed to produce.
+        // TRUNCATE cannot be made conditional, so these targets get the guarded
+        // DELETE instead - which is the shape the upsert branch already sends
+        // them, so it is supported wherever upsert is.
+        //
+        // Pinned here rather than by a run: these sinks need a live Postgres,
+        // MySQL, DuckLake or SQL Server, and the generated SQL is the part this
+        // change owns.
+        let d = pipeline_from_json(
+            r#"{"nodes":[
+                {"id":"s","position":{"x":0,"y":0},"data":{"label":"S","componentId":"src.csv","properties":{"path":"/tmp/in.csv"}}},
+                {"id":"k","position":{"x":0,"y":0},"data":{"label":"P","componentId":"snk.postgres","properties":{"host":"h","database":"db","user":"u","password":"p","tableName":"orders","mode":"truncate"}}}
+              ],"edges":[{"id":"e1","source":"s","target":"k","data":{"connectionType":"main"}}]}"#,
+        );
+        let c = compile(&d).unwrap();
+        let sql = c.stages.iter().find(|s| s.node_id == "k").unwrap().sql.clone();
+        assert!(
+            !sql.contains("TRUNCATE TABLE"),
+            "an unconditional TRUNCATE empties the target when nothing arrived: {sql}"
+        );
+        assert!(
+            sql.contains("WHERE EXISTS (SELECT 1 FROM"),
+            "the clear must be conditional on the upstream having rows: {sql}"
+        );
+        assert!(sql.contains("INSERT INTO"), "and it still inserts: {sql}");
+    }
+
+    #[test]
     fn sqlserver_bulk_carries_the_encrypt_toggle() {
         // #357: "Encrypt connection" was read only on the tiberius driver path,
         // and `bulk` defaults to true, so on the sink's default path the control

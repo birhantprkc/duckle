@@ -2707,6 +2707,89 @@ fn explode_on_a_struct_names_the_column_and_points_at_flatten() {
     }
 }
 
+fn rows_in_target(db: &str) -> usize {
+    scalar_string(&format!(
+        "ATTACH '{}' AS d (READ_ONLY); SELECT CAST(count(*) AS VARCHAR) AS n FROM d.orders",
+        db.replace('\\', "/")
+    ))
+    .parse()
+    .unwrap_or(usize::MAX)
+}
+
+/// A "truncate + insert" sink does not empty its target when the upstream
+/// produced nothing.
+///
+/// The rule is already written down in `run_oracle_sink`: "Only applied when
+/// there are rows to write. A run that produced nothing leaves the target alone
+/// rather than emptying it on the strength of an upstream that may simply have
+/// failed to produce." That comment also claims every other clearing sink checks
+/// it first, and the SQL-built ones did not: they emitted an unconditional
+/// DELETE (or TRUNCATE) and then inserted zero rows, so a late source file, a
+/// filter that matched nothing or an empty API page silently emptied yesterday's
+/// table and reported ok.
+#[test]
+fn a_truncating_sink_leaves_its_target_alone_when_nothing_arrives() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("warehouse.duckdb");
+    let target_s = target.to_string_lossy().to_string();
+
+    // A target that already holds yesterday's load.
+    let seed = write_file(tmp.path(), "seed.csv", "id,name\n1,alpha\n2,beta\n");
+    let load = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": seed, "hasHeader": true })),
+            node("k", "snk.duckdb", json!({
+                "database": target_s, "tableName": "orders", "mode": "truncate"
+            })),
+        ]),
+        json!([main_edge("e", "s", "k")]),
+    );
+    assert_eq!(engine.execute_pipeline(&load).status, "ok");
+    assert_eq!(
+        rows_in_target(&target_s),
+        2,
+        "the target starts with yesterday's two rows"
+    );
+
+    // Today the upstream produces nothing: a header-only extract.
+    let empty = write_file(tmp.path(), "empty.csv", "id,name\n");
+    let rerun = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": empty, "hasHeader": true })),
+            node("k", "snk.duckdb", json!({
+                "database": target_s, "tableName": "orders", "mode": "truncate"
+            })),
+        ]),
+        json!([main_edge("e", "s", "k")]),
+    );
+    let r = engine.execute_pipeline(&rerun);
+    assert_eq!(r.status, "ok", "an empty upstream is not an error: {:?}", r.error);
+    assert_eq!(
+        rows_in_target(&target_s),
+        2,
+        "a run that produced nothing must leave the target alone, not empty it"
+    );
+
+    // And a run that does produce rows still replaces the contents.
+    let fresh = write_file(tmp.path(), "fresh.csv", "id,name\n9,gamma\n");
+    let third = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": fresh, "hasHeader": true })),
+            node("k", "snk.duckdb", json!({
+                "database": target_s, "tableName": "orders", "mode": "truncate"
+            })),
+        ]),
+        json!([main_edge("e", "s", "k")]),
+    );
+    assert_eq!(engine.execute_pipeline(&third).status, "ok");
+    assert_eq!(
+        rows_in_target(&target_s),
+        1,
+        "truncate still replaces the rows when there are rows to write"
+    );
+}
+
 #[test]
 fn normalize_explodes_delimited_column() {
     let engine = engine_or_skip!();

@@ -6519,8 +6519,12 @@ pub(crate) fn build_relational_sink(
         // Truncate keeps the table's existing schema (and any indexes /
         // grants on it) and replaces just the rows. Useful when the
         // table is referenced by downstream views or foreign keys.
+        // A guarded DELETE rather than TRUNCATE: TRUNCATE cannot be made
+        // conditional, and the rule above applies here too. Emptying a table
+        // because an upstream hiccuped is worse than clearing it a little more
+        // slowly.
         "truncate" => Ok(format!(
-            "TRUNCATE TABLE {q}; INSERT INTO {q} SELECT * FROM {from}",
+            "DELETE FROM {q} WHERE EXISTS (SELECT 1 FROM {from}); INSERT INTO {q} SELECT * FROM {from}",
             q = qual,
             from = quote_ident(from_view)
         )),
@@ -7008,9 +7012,19 @@ pub(crate) fn build_db_sink(
         // Keep the existing table (and its rowids / downstream references),
         // replace just the rows. CREATE IF NOT EXISTS so a first run still
         // works against a fresh target file.
+        //
+        // The clear is conditional on the upstream having rows, which is the rule
+        // `run_oracle_sink` states and the Rust-side clearing sinks obey: a run
+        // that produced nothing leaves the target alone rather than emptying it
+        // on the strength of an upstream that may simply have failed to produce.
+        // A late source file, a filter matching nothing or an empty API page used
+        // to delete yesterday's data and report ok. Expressed in SQL so it costs
+        // no extra round trip, and it is the same shape the upsert branch already
+        // sends to these targets: a DELETE against the attached table correlated
+        // with the local relation.
         return Ok(format!(
             "CREATE TABLE IF NOT EXISTS duckle_dst.{t} AS SELECT * FROM {up} LIMIT 0; \
-             DELETE FROM duckle_dst.{t}; \
+             DELETE FROM duckle_dst.{t} WHERE EXISTS (SELECT 1 FROM {up}); \
              INSERT INTO duckle_dst.{t} SELECT * FROM {up}",
             t = t,
             up = up,
