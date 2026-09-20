@@ -510,7 +510,21 @@ pub fn write(workspace: &Path, receipt: &RunReceipt) -> std::io::Result<()> {
     let d = dir(workspace);
     std::fs::create_dir_all(&d)?;
     let text = serde_json::to_string_pretty(receipt).unwrap_or_default();
-    std::fs::write(path_for(workspace, &receipt.run_id), text)?;
+    // Temp file then rename, so a reader gets the whole of one version or the
+    // whole of the other. A plain write truncates first, and every reader here
+    // treats an unparseable receipt as a run that is NOT in flight - which is
+    // what lets `prune`, running on this very line, delete the receipt of a run
+    // that is still going. The temp name carries this writer's pid and a
+    // sequence so two writers cannot share it (see `alerts::save_state`).
+    let path = path_for(workspace, &receipt.run_id);
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
+    std::fs::write(&tmp, text)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     prune(workspace, &d);
     Ok(())
 }
@@ -990,6 +1004,61 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A receipt is never read half written.
+    ///
+    /// `write` truncated the file in place, and `prune` runs on EVERY receipt
+    /// write and asks `is_running` about every OTHER receipt in the workspace.
+    /// `is_running` treats an unreadable receipt as not running, on purpose, so
+    /// a reader that caught a truncating write mid-flight concluded that a
+    /// multi-hour backfill had finished - and, its mtime being old by
+    /// definition, pruned exactly the in-flight record that filter exists to
+    /// keep. `duckle retry <id>` then reports no receipt for a run still going.
+    #[test]
+    fn a_receipt_is_never_read_half_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+        // Large enough that a truncating write is observable while it happens;
+        // a real receipt carries node records and reaches this size easily.
+        let mut r = begin(&ws, "run-torn", "scheduled", "orders", "pipelines/orders.json", "h", None);
+        r.pipeline_name = "x".repeat(200_000);
+        write(&ws, &r).unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (ws, r, stop) = (ws.clone(), r.clone(), stop.clone());
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    let _ = write(&ws, &r);
+                }
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+
+        let mut torn = 0;
+        let mut reads = 0;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            reads += 1;
+            match load(&ws, "run-torn") {
+                Ok(_) => {}
+                // NotFound is a different question and cannot happen here: the
+                // receipt was written before the writer started.
+                Err(e) => {
+                    torn += 1;
+                    if torn == 1 {
+                        eprintln!("first torn read: {e:?}");
+                    }
+                }
+            }
+        }
+        writer.join().unwrap();
+        assert!(reads > 0, "the reader never ran, so this proves nothing");
+        assert_eq!(
+            torn, 0,
+            "{torn} of {reads} reads caught the receipt mid-write, and a torn receipt \
+             reads as a finished run that prune may delete"
+        );
+    }
 
     /// #289: a run waiting for capacity exists, and says why.
     #[test]
