@@ -14808,6 +14808,32 @@ impl DuckdbEngine {
         db: &Path,
         spec: &MongoSinkSpec,
     ) -> Result<String, EngineError> {
+        // Replace drops the collection, and a drop takes every index on it as
+        // well, so it is not done on an empty upstream. The rule is the one
+        // `run_oracle_sink` states and every clearing sink follows: a run that
+        // produced nothing leaves the target alone rather than emptying it on
+        // the strength of an upstream that may simply have failed to produce -
+        // a late file, a filter that matched nothing, an empty API page. This
+        // one dropped first and counted afterwards, and reported
+        // "inserted 0 docs" over a collection that was no longer there.
+        //
+        // LIMIT 1 rather than a count: the question is only whether any row
+        // exists. Asked before the staging COPY, so an empty run does no work
+        // at all.
+        if spec.mode == "replace" {
+            let probe = format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                plan::quote_ident(&spec.from_view)
+            );
+            let rows = self.run_rows(Some(db), &probe)?;
+            if rows.is_empty() {
+                return Ok(format!(
+                    "mongodb: 0 rows upstream, left {}.{} as it was",
+                    spec.database, spec.collection
+                ));
+            }
+        }
+
         // Stream the upstream through newline-delimited JSON on disk instead of
         // materializing it. run_rows held the whole result set in memory and, on
         // a million rows, spent 7 s building it before a single document was

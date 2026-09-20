@@ -867,9 +867,13 @@ fn a_sink_that_clears_its_target_checks_for_rows_first() {
     let lines: Vec<&str> = src.lines().collect();
 
     let sig = regex::Regex::new(r"^\s*pub\(crate\) fn (run_\w*sink\w*)\(").unwrap();
-    // Statements that empty or drop the thing being written to.
+    // Statements that empty or drop the thing being written to. `.drop()` is
+    // how the mongodb driver drops a collection; `drop_collection` and
+    // `delete_many`, which this list used to carry, appear nowhere in the file,
+    // so the one sink that drops its target was skipped and the test stayed
+    // green over a sink it had never examined.
     let clears =
-        regex::Regex::new(r"TRUNCATE TABLE|DELETE FROM|DROP TABLE|drop_collection|delete_many")
+        regex::Regex::new(r"TRUNCATE TABLE|DELETE FROM|DROP TABLE|\.drop\(\)|delete_many")
             .unwrap();
     // The guard every other sink uses: nothing came out of the upstream.
     let guard = regex::Regex::new(r"rows\.is_empty\(\)|has_rows|no_rows").unwrap();
