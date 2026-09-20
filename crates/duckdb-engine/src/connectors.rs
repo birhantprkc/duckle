@@ -6446,11 +6446,18 @@ impl DuckdbEngine {
             crate::now_nanos(),
             safe_file_name(name)
         ));
-        let mut f = std::fs::File::create(&path)
+        // The guard is taken BEFORE the file is created, not after the copy
+        // succeeds: a download that is cut short - a dropped connection, a 40 GB
+        // corpus on a full temp volume - has already written part of the file,
+        // and returning the error used to leave that part behind for good.
+        // Declared first so it drops LAST, after the handle below is closed:
+        // Windows refuses to remove a file that is still open.
+        let spooled = SpooledInput { path, temp: true };
+        let mut f = std::fs::File::create(&spooled.path)
             .map_err(|e| EngineError::Query(format!("spooling {uri}: {e}")))?;
         std::io::copy(&mut reader, &mut f)
             .map_err(|e| EngineError::Query(format!("fetching {uri}: {e}")))?;
-        Ok(SpooledInput { path, temp: true })
+        Ok(spooled)
     }
 
     /// xf.archive.extract: one archive artifact in, one artifact per member out.
@@ -23808,6 +23815,66 @@ mod source_path_of_tests {
         // Only a single-letter prefix is a drive. A key that legitimately
         // contains a colon keeps it.
         assert_eq!(source_path_of("s3://bucket/odd:name/f.txt"), "odd:name/f.txt");
+    }
+}
+
+#[cfg(test)]
+mod spool_cleanup_tests {
+    use super::*;
+
+    /// A fetch that is cut short leaves nothing on the temp volume.
+    ///
+    /// `SpooledInput` exists to remove the spooled file on every exit path -
+    /// its own comment says so - but it was constructed one line too late, after
+    /// the copy. The file is created before the copy, so a dropped connection,
+    /// a truncated response or a full disk returned an error with the partial
+    /// download still on disk and nothing left holding its name. A source that
+    /// retries a flaky endpoint accumulates one per attempt.
+    #[test]
+    fn a_cut_short_fetch_leaves_no_partial_download() {
+        // A server that promises a body and then hangs up part way through it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(1).flatten() {
+                use std::io::Write;
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 65536\r\n\r\n",
+                );
+                let _ = stream.write_all(&[b'x'; 512]);
+                let _ = stream.flush();
+                // and hangs up, 65024 bytes short of what it promised.
+            }
+        });
+
+        let engine = DuckdbEngine::new(std::path::PathBuf::from("duckdb"));
+        let uri = format!("http://127.0.0.1:{port}/partialspoolprobe.bin");
+        let err = engine
+            .local_copy_of_artifact(&plan::ArtifactAuth::default(), &uri)
+            .err()
+            .expect("a truncated body is an error");
+
+        let left: Vec<std::path::PathBuf> = std::fs::read_dir(std::env::temp_dir())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().ends_with("_partialspoolprobe.bin"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for p in &left {
+            let _ = std::fs::remove_file(p);
+        }
+        assert!(
+            left.is_empty(),
+            "the cut-short fetch left its partial download behind: {left:?} (error was {err})"
+        );
     }
 }
 
