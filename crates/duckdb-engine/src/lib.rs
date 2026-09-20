@@ -4705,7 +4705,12 @@ fn materialize_empty_like_view(
 ///   w.finalize_into_table(db, &spec.node_id)?;
 pub(crate) struct JsonLinesWriter {
     writer: std::io::BufWriter<std::fs::File>,
-    path: PathBuf,
+    /// The NDJSON path, held by a guard so that abandoning the writer takes the
+    /// file with it. Only the two finalizers used to remove it, and there are a
+    /// dozen `?`s between `open` and either of them - an HTTP error mid-page,
+    /// `onError: fail`, a cancelled run - each of which left a file on the temp
+    /// volume that nothing would ever collect.
+    tmp: TempJson,
     /// Rows written so far. When 0 at finalize time the NDJSON file is empty and
     /// read_json_auto would type the node as a single `json` column, breaking
     /// every downstream column reference; the finalizer builds a typed 0-row
@@ -4733,6 +4738,24 @@ fn sql_path(p: &std::path::Path) -> String {
     p.display().to_string().replace('\\', "/").replace('\'', "''")
 }
 
+/// Owns the writer's NDJSON: removed when the writer goes out of scope, by any
+/// route. The finalizers already removed it on their way out and still do - the
+/// removals are `let _ =` and a second one is a no-op - so this only adds the
+/// paths that had no owner before.
+struct TempJson {
+    path: PathBuf,
+}
+
+impl Drop for TempJson {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        // `roll_part` parks the handle on a `.rolling` file while DuckDB reads
+        // the NDJSON, and removes it once the part is written. A part that
+        // fails to convert returns before that, leaving the empty file behind.
+        let _ = std::fs::remove_file(self.path.with_extension("rolling"));
+    }
+}
+
 pub(crate) struct Spill {
     bin: PathBuf,
     db: PathBuf,
@@ -4745,6 +4768,16 @@ pub(crate) struct Spill {
     dir: PathBuf,
     parts: usize,
     rows_in_part: usize,
+}
+
+impl Drop for Spill {
+    fn drop(&mut self) {
+        // The parts are sized for the whole result - that is the point of
+        // rolling them - so a writer abandoned mid-stream leaves behind exactly
+        // the directory this path exists to avoid writing. `finalize_typed`
+        // used to be the only remover, and it is not reached on any error path.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl JsonLinesWriter {
@@ -4764,7 +4797,7 @@ impl JsonLinesWriter {
             .map_err(|e| EngineError::Query(format!("rest source: create tmp file: {}", e)))?;
         Ok(Self {
             writer: std::io::BufWriter::with_capacity(64 * 1024, file),
-            path,
+            tmp: TempJson { path },
             rows_written: 0,
             empty_schema,
             spill: None,
@@ -4784,7 +4817,7 @@ impl JsonLinesWriter {
         columns_spec: &str,
         every: usize,
     ) -> Result<Self, EngineError> {
-        let dir = self.path.with_extension("parts");
+        let dir = self.tmp.path.with_extension("parts");
         std::fs::create_dir_all(&dir)
             .map_err(|e| EngineError::Query(format!("spill: create {}: {e}", dir.display())))?;
         self.spill = Some(Spill {
@@ -4815,7 +4848,7 @@ impl JsonLinesWriter {
             .map_err(|e| EngineError::Query(format!("spill: flush: {e}")))?;
         // Reopen onto a fresh file after the conversion; the handle has to be
         // closed first because DuckDB reads the same path.
-        let empty = std::fs::File::create(self.path.with_extension("rolling"))
+        let empty = std::fs::File::create(self.tmp.path.with_extension("rolling"))
             .map_err(|e| EngineError::Query(format!("spill: create: {e}")))?;
         let old = std::mem::replace(
             &mut self.writer,
@@ -4826,7 +4859,7 @@ impl JsonLinesWriter {
         let part = spill.dir.join(format!("part-{:06}.parquet", spill.parts));
         let sql = format!(
             "COPY (SELECT * FROM read_json('{}', format='newline_delimited', columns={{{}}})) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-            sql_path(&self.path),
+            sql_path(&self.tmp.path),
             spill.columns_spec,
             sql_path(&part),
         );
@@ -4836,15 +4869,15 @@ impl JsonLinesWriter {
 
         // The NDJSON for this part is now redundant, and removing it here is
         // what bounds the temp volume to one part rather than the whole result.
-        let _ = std::fs::remove_file(&self.path);
-        let fresh = std::fs::File::create(&self.path)
+        let _ = std::fs::remove_file(&self.tmp.path);
+        let fresh = std::fs::File::create(&self.tmp.path)
             .map_err(|e| EngineError::Query(format!("spill: reopen: {e}")))?;
         let rolling = std::mem::replace(
             &mut self.writer,
             std::io::BufWriter::with_capacity(64 * 1024, fresh),
         );
         drop(rolling);
-        let _ = std::fs::remove_file(self.path.with_extension("rolling"));
+        let _ = std::fs::remove_file(self.tmp.path.with_extension("rolling"));
         Ok(())
     }
 
@@ -4884,7 +4917,7 @@ impl JsonLinesWriter {
         // or fail with a clear source-level message when none exists.
         if self.rows_written == 0 {
             let r = materialize_empty_result(bin, db, node_id, self.empty_schema.as_deref());
-            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_file(&self.tmp.path);
             return r;
         }
         // sample_size=-1 makes read_json_auto scan every row for type
@@ -4898,7 +4931,7 @@ impl JsonLinesWriter {
         let sql = format!(
             "CREATE OR REPLACE TABLE {} AS SELECT * FROM read_json_auto('{}', format='newline_delimited', sample_size=-1)",
             plan::quote_ident(node_id),
-            self.path
+            self.tmp.path
                 .display()
                 .to_string()
                 .replace('\\', "/")
@@ -4940,7 +4973,7 @@ impl JsonLinesWriter {
         // Clean up the temp NDJSON file whether the load succeeded or failed
         // (DuckDB has already read it by now); otherwise duckle-rest-*.json
         // accumulate in the temp dir forever.
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.tmp.path);
         r
     }
 
@@ -4967,6 +5000,7 @@ impl JsonLinesWriter {
             .map_err(|e| EngineError::Query(format!("rest source: flush tmp file: {}", e)))?;
         drop(self.writer);
         let path = self
+            .tmp
             .path
             .display()
             .to_string()
@@ -4993,17 +5027,63 @@ impl JsonLinesWriter {
         };
         let r = apply_duckdb_sql(bin, db, &sql);
         let parts = self.spill.as_ref().map(|s| s.parts).unwrap_or(0);
-        if let Some(spill) = self.spill.as_ref() {
-            // Every part is redundant once the relation exists. Removed whether
-            // the load worked or not: parts left behind are the temp volume this
-            // exists to protect.
-            let _ = std::fs::remove_dir_all(&spill.dir);
-        }
+        // Every part is redundant once the relation exists, and the parts
+        // directory is removed as this writer drops - on this path and on every
+        // error path, which is why `Spill` owns it rather than this function.
         // Remove the temp NDJSON regardless of the load result; otherwise
         // duckle-rest-*.json accumulate in the temp dir forever (mirrors
         // finalize_into_table). With spilling on it only ever held the tail.
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.tmp.path);
         r.map(|()| parts)
+    }
+}
+
+#[cfg(test)]
+mod jsonlines_cleanup_tests {
+    use super::JsonLinesWriter;
+    use std::path::Path;
+
+    /// A writer that is never finalized still owns files on the temp volume.
+    /// Thirteen call sites open one, and between `open` and `finalize` sit the
+    /// request, the pagination loop and every `?` in them: a 404 on page two,
+    /// `onError: fail`, a cancelled run. Each of those used to leave the NDJSON
+    /// behind for good - nothing else knows the name, and no sweep matches it.
+    #[test]
+    fn an_abandoned_writer_takes_its_ndjson_with_it() {
+        let mut w = JsonLinesWriter::open("cleanup_abandoned").unwrap();
+        let path = w.tmp.path.clone();
+        w.write_row(&serde_json::json!({ "a": 1 })).unwrap();
+        assert!(path.exists(), "the writer creates its NDJSON at open");
+        drop(w); // the error path: no finalize
+        assert!(
+            !path.exists(),
+            "abandoned NDJSON left behind: {}",
+            path.display()
+        );
+    }
+
+    /// And with spilling on it owns a directory of Parquet parts sized for the
+    /// whole result - the very thing spilling exists to keep off the temp
+    /// volume. `finalize_typed` removed it; no error path reaches that.
+    #[test]
+    fn an_abandoned_spilling_writer_takes_its_parts_with_it() {
+        let w = JsonLinesWriter::open("cleanup_spill")
+            .unwrap()
+            .spilling_every(
+                Path::new("duckdb"),
+                Path::new("unused.duckdb"),
+                "a: 'BIGINT'",
+                1_000_000,
+            )
+            .unwrap();
+        let dir = w.spill.as_ref().unwrap().dir.clone();
+        assert!(dir.exists(), "spilling creates the parts directory at open");
+        drop(w);
+        assert!(
+            !dir.exists(),
+            "abandoned spill directory left behind: {}",
+            dir.display()
+        );
     }
 }
 
