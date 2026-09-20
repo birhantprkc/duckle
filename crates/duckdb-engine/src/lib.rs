@@ -2820,6 +2820,9 @@ impl DuckdbEngine {
                     // #118: a binder error naming one of our own generated guards
                     // is about the column, not about `length`.
                     let msg = sqldiag::explain_generated(&msg, &stage.sql, &stage.component_id)
+                        // and an empty JSON read is about the file, not about the
+                        // transform that named a column it does not have.
+                        .or_else(|| sqldiag::explain_empty_json(&msg, &stage.sql))
                         .map(|explained| format!("{}: {}", stage.node_id, explained))
                         .unwrap_or(msg);
                     let category = error_category::categorize_error(&msg);
@@ -3499,6 +3502,8 @@ impl DuckdbEngine {
                 // #118: as above - explain our own guard rather than repeating
                 // DuckDB's words about a function the author never wrote.
                 let msg = sqldiag::explain_generated(&msg, &stage.sql, &stage.component_id)
+                    // and as above, an empty JSON read upstream.
+                    .or_else(|| sqldiag::explain_empty_json(&msg, &stage.sql))
                     .map(|explained| format!("{}: {}", stage.node_id, explained))
                     .unwrap_or(msg);
                 let failing_sql = Some(redact_secret_values(&stage.sql, &redact_secrets));

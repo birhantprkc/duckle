@@ -12895,6 +12895,54 @@ fn runjob_passes_context_vars_to_child() {
     assert_eq!(count(&format!("read_csv_auto('{}')", expected)), 3);
 }
 
+/// An empty JSON file is named as the cause instead of the transform below it.
+///
+/// A sink that wrote no rows leaves a 0-byte file, and `read_json_auto` over it
+/// has nothing to take column names from, so the relation is a single `json`
+/// column. The source node then reports "ok (0 rows)" and DuckDB blames the
+/// first node that names a real column: `Referenced column "status" not found
+/// in FROM clause! Candidate bindings: "json"`. The user is sent to a transform
+/// that is correct, about a column that exists, one node away from the empty
+/// file that is the actual cause.
+///
+/// Run on BOTH execution paths: this pipeline is all SQL, so it batches, and a
+/// `memoryLimitMb` forces the per-stage executor, which reports its failures
+/// from a different place.
+#[test]
+fn an_empty_json_file_is_named_rather_than_the_transform_below_it() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    // Exactly what a run that filtered everything out leaves behind.
+    let empty = write_file(tmp.path(), "yesterday.jsonl", "");
+
+    for memory_limit in [None, Some(128)] {
+        let mut src = serde_json::json!({ "path": empty, "format": "newline_delimited" });
+        if let Some(mb) = memory_limit {
+            src["memoryLimitMb"] = serde_json::json!(mb);
+        }
+        let out = out_path(tmp.path(), "res.csv");
+        let d = doc(
+            json!([
+                node("srcjson", "src.json", src),
+                node("flt", "xf.filter", json!({ "predicate": "status = 'paid'" })),
+                node("k1", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ]),
+            json!([main_edge("e1", "srcjson", "flt"), main_edge("e2", "flt", "k1")]),
+        );
+        let r = engine.execute_pipeline(&d);
+        assert_eq!(r.status, "error", "reading an empty JSON file must not pass: {:?}", r);
+        let err = r.error.clone().unwrap_or_default();
+        assert!(
+            err.contains("srcjson"),
+            "the node that read the empty file must be named (memory_limit {memory_limit:?}): {err}"
+        );
+        assert!(
+            err.contains("EMPTY"),
+            "and the reason has to be the empty file (memory_limit {memory_limit:?}): {err}"
+        );
+    }
+}
+
 #[test]
 fn a_runjob_handoff_file_does_not_outlive_its_run() {
     // The handoff parquet is a temp file the parent names, the child writes and

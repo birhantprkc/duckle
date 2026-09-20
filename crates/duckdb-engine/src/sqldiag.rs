@@ -83,6 +83,60 @@ pub fn explain_generated(message: &str, sql: &str, component_id: &str) -> Option
     Some(out)
 }
 
+/// Explain a binder error whose only candidate binding is `json`.
+///
+/// A JSON read has nothing to take column names from when the document holds no
+/// records, so `read_json_auto` over an empty file types the whole relation as a
+/// single `json` column. The run then reports the source node as "ok (0 rows)"
+/// and the failure lands on the first node that names a real column:
+///
+/// ```text
+/// Binder Error: Referenced column "status" not found in FROM clause!
+/// Candidate bindings: "json"
+/// ```
+///
+/// That error is about a transform that is correct, naming a column that exists,
+/// and says nothing about the empty file one node upstream - which is where the
+/// user has to look. A sink that wrote no rows produces exactly such a file, so
+/// a pipeline feeding another pipeline hits this the first day it filters
+/// everything out.
+///
+/// `None` unless the candidate list is that single `json` column, so a genuine
+/// typo keeps DuckDB's own candidate list, which is the useful part of it.
+pub fn explain_empty_json(message: &str, sql: &str) -> Option<String> {
+    if !message.contains("not found in FROM clause") {
+        return None;
+    }
+    // The whole candidate list has to be the one `json` column. A relation with
+    // real columns alongside it is a different failure and keeps its own words.
+    let after = message.find("Candidate bindings:").map(|i| &message[i..])?;
+    let line = after.lines().next()?;
+    let candidates = line["Candidate bindings:".len()..].trim();
+    if candidates != "\"json\"" {
+        return None;
+    }
+    let column = message
+        .find("Referenced column \"")
+        .map(|i| &message[i + "Referenced column \"".len()..])
+        .and_then(|rest| rest.find('"').map(|e| &rest[..e]))?;
+    // The relation comes from the SQL that ran, the way explain_generated takes
+    // its column from there: the message names the candidate, not the source.
+    let relation = sql
+        .find("FROM \"")
+        .map(|i| &sql[i + "FROM \"".len()..])
+        .and_then(|rest| rest.find('"').map(|e| &rest[..e]));
+    let mut out = match relation {
+        Some(r) => format!("\"{column}\" is not a column of \"{r}\", which has a single \"json\" column."),
+        None => format!("\"{column}\" is not there, and the relation has a single \"json\" column."),
+    };
+    out.push_str(
+        " That is what reading a JSON file gives when the file holds no records to take column \
+         names from, so the node upstream most likely read an EMPTY file - which is what a run \
+         that wrote no rows leaves behind. Check what produced it.",
+    );
+    Some(out)
+}
+
 /// One thing DuckDB objected to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -359,6 +413,40 @@ mod explain_tests {
         assert!(super::explain_generated("No function matches 'length(VARCHAR)'", "length(\"c\")", "xf.arr.explode").is_none());
         // A component that does not carry the guard is not explained.
         assert!(super::explain_generated("No function matches 'length(STRUCT(a INTEGER))'", "length(\"c\")", "xf.filter").is_none());
+    }
+
+    /// The real message, reproduced on the pinned CLI against a 0-byte file:
+    /// `DESCRIBE SELECT * FROM read_json_auto('empty.jsonl')` returns one
+    /// column, `json json`, and a reference to any real column fails like this.
+    #[test]
+    fn an_empty_json_read_is_named_as_the_cause() {
+        let msg = "Binder Error: Referenced column \"status\" not found in FROM clause!\nCandidate bindings: \"json\"";
+        let sql = "CREATE OR REPLACE VIEW \"f1\" AS SELECT * FROM \"s1\" WHERE status = 'paid'";
+        let out = super::explain_empty_json(msg, sql).expect("explained");
+        assert!(out.contains("\"status\""), "{out}");
+        assert!(out.contains("\"s1\""), "the node that read the file is named: {out}");
+        assert!(out.contains("EMPTY"), "{out}");
+    }
+
+    #[test]
+    fn a_real_typo_keeps_duckdbs_candidate_list() {
+        // Candidates that are actual columns: this is a misspelling, and
+        // DuckDB's own suggestion is the useful answer.
+        let msg = "Binder Error: Referenced column \"regionn\" not found in FROM clause!\nCandidate bindings: \"region\", \"amount\"";
+        let sql = "CREATE OR REPLACE VIEW \"f1\" AS SELECT regionn FROM \"s1\"";
+        assert!(super::explain_empty_json(msg, sql).is_none());
+    }
+
+    #[test]
+    fn a_column_actually_called_json_among_others_is_not_this() {
+        let msg = "Binder Error: Referenced column \"status\" not found in FROM clause!\nCandidate bindings: \"json\", \"id\"";
+        let sql = "CREATE OR REPLACE VIEW \"f1\" AS SELECT * FROM \"s1\"";
+        assert!(super::explain_empty_json(msg, sql).is_none());
+    }
+
+    #[test]
+    fn an_unrelated_error_is_not_read_as_an_empty_json() {
+        assert!(super::explain_empty_json("Conversion Error: could not convert", "SELECT 1").is_none());
     }
 }
 
