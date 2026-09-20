@@ -166,6 +166,22 @@ pub fn append_run_record(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Serialised, because this is a read-modify-write and two of them routinely
+    // overlap: the desktop appends straight from its run command and takes no
+    // run lock at all, so a scheduled run of the same pipeline under `serve` is
+    // not excluded from it. Unserialised, both loaded the same records, both
+    // pushed one, and one write won - and when a load landed inside the other's
+    // truncating write it came back EMPTY, so the next write replaced the whole
+    // history with a single record.
+    //
+    // Keyed case-insensitively: the lock name is digested exactly, while the
+    // file name is not, so on a case-insensitive filesystem `Nightly` and
+    // `nightly` share one history file and would otherwise take two locks.
+    //
+    // A workspace that cannot take the lock still gets its record: losing a run
+    // from the history is worse than a rare overlap, which is the same call
+    // `alerts::update_state` makes for the same reason.
+    let _guard = crate::runlock::lock_store(workspace, &format!("history-{}", pipeline_id.to_lowercase())).ok();
     let mut records = load_run_history(workspace, pipeline_id);
     // #325: a successful publication is an event, recorded HERE rather than at
     // each of the four places that append a record. Four call sites is four
@@ -182,7 +198,20 @@ pub fn append_run_record(
     let trimmed = &records[start..];
     let json = serde_json::to_string_pretty(trimmed)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, json)?;
+    // Temp file then rename, so a reader never sees the file mid-write. A plain
+    // write truncates first, and `load_run_history` reads an unparseable file as
+    // "no history", which is how a scrape of /metrics could report a pipeline
+    // with no runs while it had fifty. The temp name carries this writer's pid
+    // and a sequence so two of them cannot share it: see `alerts::save_state`,
+    // which is where this repository learned that the hard way.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
+    std::fs::write(&tmp, json)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     // The record is durable now, so the event can be indexed from it. Reported
     // rather than swallowed: a lost alert loses a notification, a lost
     // publication event loses downstream WORK, and the producer will not
@@ -217,9 +246,19 @@ pub fn write_metrics_textfile(workspace: &Path) -> std::io::Result<()> {
     let logs_dir = workspace.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
     let final_path = logs_dir.join("duckle_metrics.prom");
-    let tmp_path = logs_dir.join("duckle_metrics.prom.tmp");
+    // A temp name of this writer's own. One shared `.prom.tmp` is only atomic
+    // against a READER: two runs finishing together wrote the same temp, so one
+    // renamed a file the other was still filling and a scrape read a document
+    // that was half one run's and half the other's.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = logs_dir.join(format!("duckle_metrics.prom.{}.{seq}.tmp", std::process::id()));
     std::fs::write(&tmp_path, &out)?;
-    std::fs::rename(&tmp_path, &final_path)
+    if let Err(e) = std::fs::rename(&tmp_path, &final_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// How many pipelines may contribute label values.
@@ -433,6 +472,80 @@ mod tests {
         std::fs::remove_file(tmp.path().join("runs")).unwrap();
         assert!(record_run(tmp.path(), "nightly", rec), "a writable history must still record");
         assert_eq!(load_run_history(tmp.path(), "nightly").len(), 1);
+    }
+
+    /// Two runs of one pipeline finishing together keep both records, and a
+    /// reader never sees a half-written file.
+    ///
+    /// `append_run_record` was a read-modify-write with no lock, finished by a
+    /// truncating `fs::write`: the desktop appends directly (it takes no run
+    /// lock at all) while `serve`'s scheduler fires the same pipeline, so both
+    /// load the same 50 records, both push one, and one of them wins - or worse,
+    /// one loads while the other has truncated the file to zero, gets an empty
+    /// history out of `unwrap_or_default`, and writes back a single record.
+    /// Fifty runs of history are gone, and the Runs tab, alerting, freshness and
+    /// `runs diff` all read that file.
+    #[test]
+    fn concurrent_appends_keep_every_record() {
+        let ws = tempfile::tempdir().unwrap();
+        let root = ws.path().to_path_buf();
+        // Enough writers and rounds to lose records reliably when unserialised:
+        // the window is the whole load-push-write, not a single syscall.
+        let writers = 6;
+        let each = 12;
+        // Seed one record first: a reader that arrives before the file exists
+        // sees "no history" legitimately, and that is not the torn read this is
+        // watching for.
+        super::append_run_record(&root, "nightly", record("ok", 1, 0)).expect("seeded");
+        let readers_saw_empty = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher = {
+            let (root, seen, stop) = (root.clone(), readers_saw_empty.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    // A reader must never observe the file mid-rewrite. Empty is
+                    // the shape that does the damage, because the next writer
+                    // takes it for the whole history.
+                    if super::load_run_history(&root, "nightly").is_empty() {
+                        seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            })
+        };
+
+        std::thread::scope(|scope| {
+            for w in 0..writers {
+                let root = root.clone();
+                scope.spawn(move || {
+                    for i in 0..each {
+                        let mut r = record("ok", 1, 0);
+                        r.run_id = Some(format!("w{w}-{i}"));
+                        super::append_run_record(&root, "nightly", r).expect("appended");
+                    }
+                });
+            }
+        });
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().unwrap();
+
+        let kept = super::load_run_history(&root, "nightly");
+        let total = writers * each + 1; // + the seed
+        // MAX_RECORDS is the only thing allowed to drop a record.
+        let expect = total.min(super::MAX_RECORDS);
+        assert_eq!(
+            kept.len(),
+            expect,
+            "{writers} writers x {each} appends should leave {expect} records, not {}",
+            kept.len()
+        );
+        let ids: std::collections::HashSet<_> =
+            kept.iter().filter_map(|r| r.run_id.as_deref()).collect();
+        assert_eq!(ids.len(), kept.len(), "a record was written twice");
+        assert_eq!(
+            readers_saw_empty.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a reader saw an empty history while a write was in flight"
+        );
     }
 
     fn record(status: &str, duration_ms: u64, rows: u64) -> RunRecord {
