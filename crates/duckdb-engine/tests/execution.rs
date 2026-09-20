@@ -2651,6 +2651,62 @@ fn denormalize_groups_into_delimited_cells() {
     assert!(v.contains('x') && v.contains('y'), "got {}", v);
 }
 
+/// #118: Explode on a STRUCT says what is wrong and what to use instead.
+///
+/// Explode guards a NULL or empty list so the row is not silently dropped, and
+/// DuckDB binds every branch of a CASE, so `length()` is bound against a STRUCT
+/// and refused before the condition is ever evaluated. The user then reads
+/// `No function matches the given name and argument types 'length(STRUCT(...))'`
+/// about a function they never wrote, in a guard they cannot see.
+///
+/// The component is list-only by design - a struct expands into columns and
+/// keeps one row, which is Flatten's shape, not Explode's - so the fix is for
+/// the failure to name the column, its type and the component that does take it.
+#[test]
+fn explode_on_a_struct_names_the_column_and_points_at_flatten() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+    // Both executors, because this engine has two and a fix wired into one
+    // passes the other's test. A memory cap takes the pipeline off the batched
+    // path, so the same run is driven stage by stage.
+    let build = |per_stage: bool| {
+        let mut explode = json!({ "column": "s" });
+        if per_stage {
+            explode["memoryLimitMb"] = json!(128);
+        }
+        doc(
+            json!([
+                node("s", "code.sql", json!({
+                    "sql": "SELECT 1 AS id, {'v1': 'a', 'v2': 'b'} AS s"
+                })),
+                node("x", "xf.arr.explode", explode),
+                node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ]),
+            json!([main_edge("e1", "s", "x"), main_edge("e2", "x", "k")]),
+        )
+    };
+    for per_stage in [false, true] {
+        let d = build(per_stage);
+        let r = engine.execute_pipeline(&d);
+        let path = if per_stage { "per-stage" } else { "batched" };
+        assert_ne!(r.status, "ok", "{path}: a struct is not explodable, so the run must fail");
+        let err = r.error.unwrap_or_default();
+        assert!(
+            err.contains("\"s\"") && err.to_uppercase().contains("STRUCT"),
+            "{path}: the failure must name the column and its type: {err}"
+        );
+        assert!(
+            err.contains("Flatten"),
+            "{path}: and point at the component that takes a struct: {err}"
+        );
+        assert!(
+            !err.contains("length("),
+            "{path}: and not name an internal guard the user never wrote: {err}"
+        );
+    }
+}
+
 #[test]
 fn normalize_explodes_delimited_column() {
     let engine = engine_or_skip!();

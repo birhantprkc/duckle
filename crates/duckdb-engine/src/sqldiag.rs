@@ -32,6 +32,57 @@
 
 use serde::Serialize;
 
+/// #118: explain a binder error that names one of the engine's OWN generated
+/// helpers rather than anything the author wrote.
+///
+/// Explode and Normalize guard a NULL or empty list so the row is not silently
+/// dropped, and DuckDB binds every branch of a `CASE`, so `length()` is bound
+/// against whatever the column really is and refused before the condition is
+/// ever evaluated. The author is then told that `length(STRUCT(...))` does not
+/// exist: a function they never wrote, in a guard they cannot see, about a
+/// component whose own name does not appear.
+///
+/// This names the column, the type it actually has, and - for a struct - the
+/// component that does take one. It costs nothing per run: it reads the failure
+/// that already happened rather than probing ahead of one.
+///
+/// `None` when the message is not that failure, so the caller keeps DuckDB's own
+/// words. Pure, like the rest of this module: message and SQL in, message out.
+pub fn explain_generated(message: &str, sql: &str, component_id: &str) -> Option<String> {
+    let at = message.find("'length(")?;
+    let rest = &message[at + "'length(".len()..];
+    // The type runs to the quote that closes the function signature, and may
+    // contain its own parentheses: STRUCT(v1 VARCHAR, v2 VARCHAR).
+    let end = rest.find(")'")?;
+    let actual = rest[..end].trim();
+    if actual.is_empty() || actual.eq_ignore_ascii_case("VARCHAR") {
+        return None;
+    }
+    // The column comes from the SQL rather than the message, because the message
+    // names the type and not the name. Both sides are the text that actually ran.
+    let column = sql
+        .find("length(\"")
+        .map(|i| &sql[i + "length(\"".len()..])
+        .and_then(|rest| rest.find("\")").map(|e| &rest[..e]))?;
+    let what = match component_id {
+        "xf.arr.explode" => "Explode",
+        "xf.norm" => "Normalize",
+        _ => return None,
+    };
+    let mut out = format!(
+        "{what} takes a LIST or ARRAY column, and \"{column}\" is {actual}."
+    );
+    if actual.to_ascii_uppercase().starts_with("STRUCT") {
+        out.push_str(
+            " A struct expands into columns rather than into rows, which is what Flatten does - use that instead.",
+        );
+    }
+    if component_id == "xf.norm" {
+        out.push_str(" Leave Separator empty only when the column is already an array.");
+    }
+    Some(out)
+}
+
 /// One thing DuckDB objected to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -263,6 +314,52 @@ pub fn remote_hints(sql: &str) -> Vec<Diagnostic> {
         )));
     }
     out
+}
+
+#[cfg(test)]
+mod explain_tests {
+    /// The struct case the issue reported, end to end through the explainer.
+    #[test]
+    fn a_struct_explode_is_explained_by_name_type_and_alternative() {
+        let msg = "Binder Error: No function matches the given name and argument types \
+                   'length(STRUCT(v1 VARCHAR, v2 VARCHAR))'. You might need to add explicit type casts.";
+        let sql = "CREATE OR REPLACE VIEW \"x\" AS SELECT unnest(CASE WHEN \"s\" IS NULL OR length(\"s\") = 0 THEN [NULL] ELSE \"s\" END) AS \"s\", * EXCLUDE (\"s\") FROM \"up\"";
+        let out = super::explain_generated(msg, sql, "xf.arr.explode").expect("explained");
+        assert!(out.contains("\"s\""), "names the column: {out}");
+        assert!(out.contains("STRUCT(v1 VARCHAR, v2 VARCHAR)"), "names the real type: {out}");
+        assert!(out.contains("Flatten"), "points at the component that takes it: {out}");
+        assert!(!out.contains("length("), "and never mentions the internal guard: {out}");
+    }
+
+    /// A scalar is explained too, without inventing a Flatten that would not help.
+    #[test]
+    fn a_scalar_explode_is_explained_without_the_flatten_pointer() {
+        let msg = "Binder Error: No function matches the given name and argument types 'length(INTEGER)'.";
+        let sql = "SELECT unnest(CASE WHEN \"id\" IS NULL OR length(\"id\") = 0 THEN [NULL] ELSE \"id\" END) FROM \"up\"";
+        let out = super::explain_generated(msg, sql, "xf.arr.explode").expect("explained");
+        assert!(out.contains("\"id\"") && out.contains("INTEGER"), "{out}");
+        assert!(!out.contains("Flatten"), "a struct is the only case Flatten answers: {out}");
+    }
+
+    /// Normalize shares the guard, so it gets its own name and its own advice.
+    #[test]
+    fn normalize_is_named_as_itself() {
+        let msg = "Binder Error: No function matches the given name and argument types 'length(STRUCT(a INTEGER))'.";
+        let sql = "SELECT unnest(CASE WHEN \"tags\" IS NULL OR length(\"tags\") = 0 THEN [NULL] ELSE \"tags\" END) FROM \"up\"";
+        let out = super::explain_generated(msg, sql, "xf.norm").expect("explained");
+        assert!(out.starts_with("Normalize takes"), "{out}");
+        assert!(out.contains("Separator"), "{out}");
+    }
+
+    /// Anything else keeps DuckDB's own words.
+    #[test]
+    fn an_unrelated_error_is_left_alone() {
+        assert!(super::explain_generated("Binder Error: Referenced column \"regionn\" not found", "SELECT 1", "xf.arr.explode").is_none());
+        // A VARCHAR binds length() fine, so this message cannot come from the guard.
+        assert!(super::explain_generated("No function matches 'length(VARCHAR)'", "length(\"c\")", "xf.arr.explode").is_none());
+        // A component that does not carry the guard is not explained.
+        assert!(super::explain_generated("No function matches 'length(STRUCT(a INTEGER))'", "length(\"c\")", "xf.filter").is_none());
+    }
 }
 
 #[cfg(test)]

@@ -2797,6 +2797,11 @@ impl DuckdbEngine {
                 }
                 Err(err) => {
                     let msg = redact_secret_values(&err.to_string(), &redact_secrets);
+                    // #118: a binder error naming one of our own generated guards
+                    // is about the column, not about `length`.
+                    let msg = sqldiag::explain_generated(&msg, &stage.sql, &stage.component_id)
+                        .map(|explained| format!("{}: {}", stage.node_id, explained))
+                        .unwrap_or(msg);
                     let category = error_category::categorize_error(&msg);
                     let failing_sql = Some(redact_secret_values(&stage.sql, &redact_secrets));
                     nodes.insert(
@@ -3471,6 +3476,11 @@ impl DuckdbEngine {
                 } else {
                     redact_secret_values(&stderr_str, &redact_secrets)
                 };
+                // #118: as above - explain our own guard rather than repeating
+                // DuckDB's words about a function the author never wrote.
+                let msg = sqldiag::explain_generated(&msg, &stage.sql, &stage.component_id)
+                    .map(|explained| format!("{}: {}", stage.node_id, explained))
+                    .unwrap_or(msg);
                 let failing_sql = Some(redact_secret_values(&stage.sql, &redact_secrets));
                 nodes.insert(
                     stage.node_id.clone(),
