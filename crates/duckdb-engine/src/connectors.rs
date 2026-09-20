@@ -2118,9 +2118,18 @@ impl DuckdbEngine {
         //
         // LIMIT 1 rather than a count: the question is whether ANY row exists,
         // and the rows are materialized further down anyway.
+        //
+        // The probe reads the SAME projection the write will read, not a bare
+        // `SELECT 1`. A constant projection cannot fail the way the real read
+        // can - a non-finite double in a selected column, for one - so the guard
+        // said "there are rows", the table was truncated, and the read that
+        // followed came back empty. The rule is that the row set which decides
+        // "there is nothing to write" has to be the one that decides "do not
+        // clear", and the only way to keep that true is to ask the same question.
         if spec.upsert_keys.is_empty() && spec.mode == "truncate" {
             let probe = format!(
-                "SELECT 1 FROM {} LIMIT 1",
+                "SELECT {} FROM {} LIMIT 1",
+                select_items.join(", "),
                 plan::quote_ident(&spec.from_view)
             );
             let rows = self.run_rows(Some(db), &probe)?;

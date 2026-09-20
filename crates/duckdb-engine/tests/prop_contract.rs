@@ -916,6 +916,38 @@ fn a_sink_that_clears_its_target_checks_for_rows_first() {
     );
 }
 
+/// A clearing sink decides emptiness from the SAME rows it is about to write.
+///
+/// `run_oracle_sink` probed with `SELECT 1 FROM <view> LIMIT 1` and truncated on
+/// the strength of it. A constant projection cannot fail the way the real read
+/// can, so a result the row bridge could not carry - a non-finite double, say -
+/// passed the guard, the table was emptied, and the read that followed returned
+/// nothing. Source-level because this path needs a live Oracle and sits behind
+/// `#[cfg(feature = "oracle")]`, so no default test binary even compiles it.
+#[test]
+fn the_oracle_truncate_guard_probes_what_it_will_write() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("connectors.rs");
+    let src = std::fs::read_to_string(&path).expect("connectors.rs");
+    let start = src
+        .find("pub(crate) fn run_oracle_sink")
+        .expect("run_oracle_sink has moved, so this check proves nothing");
+    let body = &src[start..];
+    let at = body
+        .find("let probe = format!(")
+        .expect("the truncate guard has gone; it is what keeps a failed run from emptying a table");
+    let probe = &body[at..at + 220.min(body.len() - at)];
+    assert!(
+        !probe.contains("\"SELECT 1 FROM"),
+        "the guard probes a constant, which cannot fail the way the real read can:\n{probe}"
+    );
+    assert!(
+        probe.contains("select_items"),
+        "the guard must read the projection the write reads:\n{probe}"
+    );
+}
+
 /// A field the FORM presents as a secret must be one the redactor recognises.
 ///
 /// `is_secret_prop_key` drives two protections. `collect_secrets` scrubs values
