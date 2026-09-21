@@ -9679,6 +9679,70 @@ fn a_run_reports_the_rows_it_kept_not_the_rows_it_skipped() {
     }
 }
 
+/// A run that is stopped mid-write leaves no partial file at the output path.
+///
+/// DuckDB stages a COPY beside the target and renames it when the write
+/// finished, but by default only when the target ALREADY EXISTS. A dated export
+/// - `orders-${date}.csv`, which the date builtins stamp fresh on every run -
+/// therefore had no such protection, so a stopped run left a file with a correct
+/// header, rows in order, a parseable last line and a fifth of the data missing,
+/// and nothing marking it. Any consumer read it as a complete day's extract.
+///
+/// Stopping is what has to be tested, because DuckDB cleans up after an ordinary
+/// error by itself: only a killed process leaves the file. `request_cancel` kills
+/// the CLI child, which is the same abrupt end.
+#[test]
+fn a_stopped_run_leaves_no_partial_file_at_the_output_path() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = out_path(tmp.path(), "export.csv");
+    // The destination does not exist, which is the case that had no staging.
+    assert!(!Path::new(&out).exists());
+
+    // Slow to produce and modest on disk, so the cancel lands inside the write
+    // without making this test an I/O storm for everything running beside it.
+    let d = doc(
+        json!([
+            node(
+                "s",
+                "code.sql",
+                json!({ "sql": "SELECT i, md5(repeat(i::VARCHAR, 60)) AS pad FROM range(1500000) t(i)" })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    );
+
+    let stopper = {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            engine.request_cancel();
+        })
+    };
+    let r = engine.execute_pipeline(&d);
+    stopper.join().unwrap();
+    engine.clear_cancel();
+
+    // If the machine was fast enough to finish first there is nothing to assert
+    // about a partial file, but the run must then be complete - never a green
+    // run over a short file.
+    if r.status == "ok" {
+        assert_eq!(
+            count(&format!("read_csv_auto('{}')", out)),
+            1_500_000,
+            "the run reported ok over a file that is not the whole export"
+        );
+        return;
+    }
+    assert!(
+        !Path::new(&out).exists(),
+        "a stopped run left a partial file at the real output path, where a \
+         consumer reads it as a complete export: {} bytes",
+        std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0)
+    );
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.

@@ -9839,6 +9839,29 @@ fn partition_guarded_source(props: &JsonValue, from_view: &str, partition: &[Str
     )
 }
 
+/// `USE_TMP_FILE true` for a single-file COPY, so the destination path only
+/// ever holds a complete file.
+///
+/// DuckDB stages a COPY beside the target and renames it when the write
+/// finished - but by DEFAULT only when the target already exists. So a run that
+/// was killed mid-write left a partial file at the REAL path whenever the
+/// destination was new, which is every dated export: correct header, rows in
+/// order, a last line intact enough to parse, and a fifth of the data missing,
+/// with nothing marking it. Measured on this repo: an 8,000,000-row export
+/// killed 2.6s in left 6,162,821 rows that read back with no error at all;
+/// with the destination already present, the same kill left the good file
+/// untouched. Asking for it always is what makes those two cases behave alike,
+/// rather than the durability of an output depending on whether yesterday's
+/// file happens to still be there.
+///
+/// Not for a partitioned write: that produces a DIRECTORY of files, with no
+/// single file to stage.
+fn staged_write(options: &mut Vec<String>, partitioned: bool) {
+    if !partitioned {
+        options.push("USE_TMP_FILE true".to_string());
+    }
+}
+
 pub(crate) fn build_csv_sink(props: &JsonValue, from_view: &str) -> String {
     let path = string_prop(props, "path").unwrap_or_default();
     // The sink form writes `writeHeader`; the source uses `hasHeader`.
@@ -9867,6 +9890,7 @@ pub(crate) fn build_csv_sink(props: &JsonValue, from_view: &str) -> String {
         options.push(format!("PARTITION_BY ({})", cols));
         options.push("OVERWRITE_OR_IGNORE".to_string());
     }
+    staged_write(&mut options, !partition.is_empty());
     format!(
         "COPY ({}) TO '{}' ({})",
         partition_guarded_source(props, from_view, &partition),
@@ -9941,6 +9965,7 @@ pub(crate) fn build_parquet_sink(props: &JsonValue, from_view: &str) -> String {
         // leave untouched siblings alone).
         options.push("OVERWRITE_OR_IGNORE".to_string());
     }
+    staged_write(&mut options, !partition.is_empty());
     let source = partition_guarded_source(props, from_view, &partition);
     // #319: optional Hilbert spatial ordering, so geometries that are close on
     // the ground land close in the file and row-group pruning can skip more.
@@ -9995,7 +10020,7 @@ pub(crate) fn build_json_sink(props: &JsonValue, from_view: &str) -> String {
         .map(|f| f.eq_ignore_ascii_case("array"))
         .unwrap_or(false);
     format!(
-        "COPY (SELECT * FROM {}) TO '{}' (FORMAT JSON, ARRAY {})",
+        "COPY (SELECT * FROM {}) TO '{}' (FORMAT JSON, ARRAY {}, USE_TMP_FILE true)",
         quote_ident(from_view),
         sql_escape(&path),
         if array { "true" } else { "false" }

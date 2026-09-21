@@ -4641,11 +4641,15 @@
 
     #[test]
     fn a_parquet_sink_without_the_option_is_byte_for_byte_what_it_was() {
+        // The option this pins is the Hilbert ordering: a sink that does not ask
+        // for it gets none of that machinery. USE_TMP_FILE is not part of that
+        // question - it is on every single-file COPY, so that a run killed
+        // mid-write cannot leave a partial file at the real output path.
         let sql = super::builders::build_parquet_sink(
             &serde_json::json!({ "path": "/lake/out.parquet" }),
             "v",
         );
-        assert_eq!(sql, "COPY (SELECT * FROM \"v\") TO '/lake/out.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD')");
+        assert_eq!(sql, "COPY (SELECT * FROM \"v\") TO '/lake/out.parquet' (FORMAT PARQUET, COMPRESSION 'ZSTD', USE_TMP_FILE true)");
     }
 
     #[test]
