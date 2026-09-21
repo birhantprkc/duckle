@@ -73,6 +73,11 @@ pub struct Stage {
     /// enforce "error if exists" before writing.
     pub sink_path: Option<String>,
     pub sink_mode: Option<String>,
+    /// For a single-file sink that stages: the path its COPY writes to, which
+    /// the executor renames onto `sink_path` once the stage has finished. Set
+    /// from `builders::staged_sink_path`, the same call that pointed the COPY
+    /// there, so the two cannot disagree about whether this sink staged.
+    pub staged_write: Option<String>,
     /// For a file sink: the compression its COPY will use. A source that can
     /// write the destination itself reads this so the file it produces matches
     /// what the sink would have written.
@@ -1906,6 +1911,7 @@ fn build_stage(
         .cloned()
         .unwrap_or(JsonValue::Null);
     let mut sink_path: Option<String> = None;
+    let mut staged_write: Option<String> = None;
     let mut sink_compression: Option<String> = None;
     let mut sink_direct = false;
     let mut sink_mode: Option<String> = None;
@@ -3589,6 +3595,7 @@ fn build_stage(
             .ok_or_else(|| missing_input(node, "main"))?;
         sink_path = string_prop(&props, "path").filter(|s| !s.is_empty());
         sink_mode = string_prop(&props, "mode").filter(|s| !s.is_empty());
+        staged_write = builders::staged_sink_path(component_id, &props);
         sink_compression = string_prop(&props, "compression").filter(|s| !s.is_empty());
         sink_direct = props
             .get("directWrite")
@@ -7098,6 +7105,7 @@ fn build_stage(
         },
         sink_path,
         sink_mode,
+        staged_write,
         sink_compression,
         sink_direct,
         runtime,

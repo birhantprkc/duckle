@@ -579,9 +579,17 @@
             compiled.stages[1].sql
         );
         assert_eq!(compiled.stages[2].kind, StageKind::Sink);
+        // The COPY writes the staged file and the executor renames it onto the
+        // destination, so the path in the SQL carries the staging extension.
+        // The destination itself is on the stage, which is what publishes it.
         assert!(compiled.stages[2]
             .sql
-            .contains("TO '/tmp/out.parquet' (FORMAT PARQUET"));
+            .contains("TO '/tmp/out.parquet.duckle-partial' (FORMAT PARQUET"));
+        assert_eq!(compiled.stages[2].sink_path.as_deref(), Some("/tmp/out.parquet"));
+        assert_eq!(
+            compiled.stages[2].staged_write.as_deref(),
+            Some("/tmp/out.parquet.duckle-partial")
+        );
     }
 
     #[test]
@@ -957,6 +965,40 @@
         // batchSize honoured, and clamped to SQL Server's 1000 ceiling.
         assert!(sql(r#","batchSize":500"#).contains("SET mssql_insert_batch_size = 500"));
         assert!(sql(r#","batchSize":5000"#).contains("SET mssql_insert_batch_size = 1000"), "clamp to 1000");
+    }
+
+    #[test]
+    fn a_single_file_sink_writes_through_a_name_no_glob_matches() {
+        use crate::plan::builders::{build_sink_sql, staged_sink_path};
+        let staged = |id: &str, p: serde_json::Value| staged_sink_path(id, &p);
+
+        // The ordinary case: a local single file, written in overwrite mode.
+        assert_eq!(
+            staged("snk.csv", serde_json::json!({ "path": "/lake/out.csv" })),
+            Some("/lake/out.csv.duckle-partial".to_string())
+        );
+        // And the SQL points there, so the executor's rename has something to
+        // publish. One function decides both.
+        let sql = build_sink_sql("snk.csv", &serde_json::json!({ "path": "/lake/out.csv" }), "v", &[], None).unwrap();
+        assert!(sql.contains("'/lake/out.csv.duckle-partial'"), "{sql}");
+
+        // A partitioned write is a directory, not a file.
+        assert_eq!(
+            staged("snk.parquet", serde_json::json!({ "path": "/lake/o.parquet", "partitionBy": ["day"] })),
+            None
+        );
+        // A rename is a local operation.
+        assert_eq!(staged("snk.csv", serde_json::json!({ "path": "s3://b/o.csv" })), None);
+        // A glob is not a single file.
+        assert_eq!(staged("snk.csv", serde_json::json!({ "path": "/lake/*.csv" })), None);
+        // Only overwrite: an append adds to what is there, and publishing by
+        // rename would replace it instead.
+        assert_eq!(
+            staged("snk.csv", serde_json::json!({ "path": "/lake/o.csv", "mode": "append" })),
+            None
+        );
+        // A sink that does not write one file this way is untouched.
+        assert_eq!(staged("snk.excel", serde_json::json!({ "path": "/lake/o.xlsx" })), None);
     }
 
     #[test]

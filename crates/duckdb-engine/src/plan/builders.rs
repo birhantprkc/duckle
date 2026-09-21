@@ -9646,6 +9646,69 @@ fn refuse_unimplemented_file_mode(
     )))
 }
 
+/// The extension a single-file sink writes under before it is published.
+///
+/// Deliberately not the destination's extension: a source glob is written as
+/// `*.csv`, and the whole point is that no glob of the OUTPUT format can match
+/// a file that is still being written. A downstream pipeline reading
+/// `/lake/daily/*.csv` used to load the good file plus a prefix of an abandoned
+/// one - measured here as 10,518,992 rows where 8,000,000 existed, on a run
+/// that reported success.
+pub(crate) const STAGED_SUFFIX: &str = ".duckle-partial";
+
+/// Where a single-file sink writes before it is published, or None when it
+/// writes its destination directly.
+///
+/// Publishing is a rename onto the destination, so the destination only ever
+/// holds a file that was finished. DuckDB stages a COPY itself, but only when
+/// the target already exists, which a dated export never does - so a run killed
+/// mid-write left a partial file at the real path, with a correct header, rows
+/// in order and a fifth of the data missing.
+///
+/// ONE function decides, and both sides call it: `build_sink_sql` points the
+/// COPY here, and the planner records the same answer on the Stage for the
+/// executor to publish. If the two could disagree, the disagreement would be a
+/// sink that wrote to a name nobody renames - a run that reports success having
+/// published nothing.
+///
+/// Not for: a mode other than overwrite (append adds to what is there, and a
+/// rename would replace it; "error if exists" is a question about the
+/// destination), a partitioned write (a DIRECTORY of files, not one file), a
+/// remote destination (a rename is a local filesystem operation), or a glob.
+pub(crate) fn staged_sink_path(component_id: &str, props: &JsonValue) -> Option<String> {
+    if !matches!(
+        component_id,
+        "snk.csv" | "snk.tsv" | "snk.parquet" | "snk.json" | "snk.jsonl"
+    ) {
+        return None;
+    }
+    let mode = string_prop(props, "mode").unwrap_or_default();
+    if !matches!(mode.trim().to_ascii_lowercase().as_str(), "" | "overwrite") {
+        return None;
+    }
+    if !columns_from_props(props, "partitionBy")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return None;
+    }
+    let path = string_prop(props, "path").filter(|p| !p.trim().is_empty())?;
+    if !crate::is_local_path(&path) || path.contains(['*', '?', '[', '{']) {
+        return None;
+    }
+    Some(format!("{}{}", path, STAGED_SUFFIX))
+}
+
+/// The props a sink's COPY is built from: the same props with `path` pointed at
+/// the staging file, when this sink stages.
+fn staged_props(component_id: &str, props: &JsonValue) -> JsonValue {
+    let mut p = props.clone();
+    if let (Some(staged), Some(obj)) = (staged_sink_path(component_id, props), p.as_object_mut()) {
+        obj.insert("path".into(), JsonValue::String(staged));
+    }
+    p
+}
+
 pub(crate) fn build_sink_sql(
     component_id: &str,
     props: &JsonValue,
@@ -9656,10 +9719,10 @@ pub(crate) fn build_sink_sql(
     match component_id {
         "snk.csv" => {
             refuse_unimplemented_file_mode(component_id, props)?;
-            Ok(build_csv_sink(props, from_view))
+            Ok(build_csv_sink(&staged_props(component_id, props), from_view))
         }
         "snk.tsv" => {
-            let mut p = props.clone();
+            let mut p = staged_props(component_id, props);
             if let Some(obj) = p.as_object_mut() {
                 obj.insert("delimiter".into(), JsonValue::String("\t".into()));
             }
@@ -9667,11 +9730,11 @@ pub(crate) fn build_sink_sql(
         }
         "snk.parquet" => {
             refuse_unimplemented_file_mode(component_id, props)?;
-            Ok(build_parquet_sink(props, from_view))
+            Ok(build_parquet_sink(&staged_props(component_id, props), from_view))
         }
         "snk.json" | "snk.jsonl" => {
             refuse_unimplemented_file_mode(component_id, props)?;
-            Ok(build_json_sink(props, from_view))
+            Ok(build_json_sink(&staged_props(component_id, props), from_view))
         }
         "snk.s3" | "snk.gcs" | "snk.azureblob"
         | "snk.minio" | "snk.r2" | "snk.b2" => {

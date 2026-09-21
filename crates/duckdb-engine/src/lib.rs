@@ -2685,6 +2685,16 @@ impl DuckdbEngine {
                     break;
                 }
             }
+            // A staged sink publishes now that its COPY has finished. Inside the
+            // retry loop would publish a partial answer between attempts; after
+            // the run's own success is decided is where it belongs.
+            let result = match result {
+                Ok(msg) => match publish_staged(stage) {
+                    Ok(()) => Ok(msg),
+                    Err(e) => Err(EngineError::Query(e)),
+                },
+                err => err,
+            };
             let elapsed_ms = started.elapsed().as_millis() as u64;
 
             // A runtime stage can report that it checked its source and found
@@ -3519,6 +3529,16 @@ impl DuckdbEngine {
         // way.
         let _ = writer_thread.join();
         cli_stderr = stderr_thread.join().unwrap_or_default();
+
+        // Publish the staged sinks. Markers drain in order and one is written
+        // after each stage's own statement, so `completed` is exactly how far
+        // the script got: the sinks below it wrote their file in full, which is
+        // what this path published before staging existed.
+        for stage in stages.iter().take(completed) {
+            if let Err(e) = publish_staged(stage) {
+                overall_error.get_or_insert(e);
+            }
+        }
 
         if let Some(idx) = failed_stage_idx {
             if idx < stages.len() {
@@ -6298,6 +6318,31 @@ fn oracle_insert_all_rows_per_stmt(num_cols: usize, batch_size: usize) -> usize 
 /// That only holds where the sink owns the whole file: an append would also
 /// count rows that were already there, and a partitioned write spreads them
 /// across a directory tree this path does not name.
+/// Publish a staged sink: rename what the COPY wrote onto the destination.
+///
+/// The destination therefore only ever holds a file that was finished, and the
+/// file being written carries an extension no source glob matches, so a
+/// downstream `*.csv` cannot pick up a run that is still going - or one that was
+/// killed, whose staged file simply waits to be overwritten by the next run of
+/// the same sink.
+///
+/// A missing staged file is not a failure: a sink whose upstream source wrote
+/// the destination itself (`directWrite`) never ran a COPY.
+///
+/// A failed rename IS a failure. The rows are on disk under a name nothing else
+/// reads, and a run that reported ok would have published nothing.
+fn publish_staged(stage: &plan::Stage) -> Result<(), String> {
+    let (Some(staged), Some(dest)) = (stage.staged_write.as_deref(), stage.sink_path.as_deref())
+    else {
+        return Ok(());
+    };
+    if !std::path::Path::new(staged).exists() {
+        return Ok(());
+    }
+    std::fs::rename(staged, dest)
+        .map_err(|e| format!("publishing {} from {}: {}", dest, staged, e))
+}
+
 fn sink_self_count(stage: &plan::Stage) -> Option<String> {
     if stage.component_id != "snk.parquet" {
         return None;
@@ -6309,7 +6354,9 @@ fn sink_self_count(stage: &plan::Stage) -> Option<String> {
     if stage.sql.contains("PARTITION_BY") {
         return None;
     }
-    let path = stage.sink_path.as_deref()?;
+    // The staged file when this sink stages: in the batched path this COUNT is a
+    // statement in the same script, so it runs before the publish.
+    let path = stage.staged_write.as_deref().or(stage.sink_path.as_deref())?;
     // read_parquet globs, and the sink wrote ONE literal file. Measured against
     // DuckDB 1.5.4: `o[12].parquet` expands and counts files this sink never
     // wrote, and `o{1,2}.parquet` raises "No files found that match the
@@ -7704,6 +7751,7 @@ mod tests {
             from: None,
             publish_group: None,
             sink_path: None,
+            staged_write: None,
             sink_mode: None,
             sink_compression: None,
             sink_direct: false,

@@ -9743,6 +9743,137 @@ fn a_stopped_run_leaves_no_partial_file_at_the_output_path() {
     );
 }
 
+/// A glob over the output directory cannot pick up a run that is still going,
+/// or one that was killed.
+///
+/// DuckDB stages a COPY beside the target as `tmp_<name>.csv` - a name `*.csv`
+/// matches. A downstream pipeline reading `/lake/daily/*.csv` therefore loaded
+/// the good file plus a prefix of an abandoned run: measured on this repo as
+/// 10,518,992 rows where 8,000,000 existed, on a run that reported success, and
+/// different on every kill so it reads like flaky source data. Duckle now writes
+/// through a name carrying an extension no output glob matches, and renames onto
+/// the destination when the write has finished.
+#[test]
+fn a_glob_of_the_output_directory_cannot_pick_up_a_run_in_flight() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let lake = tmp.path().join("lake");
+    std::fs::create_dir_all(&lake).unwrap();
+
+    // Yesterday's good file, three rows, written by a run that finished.
+    let seed = write_file(tmp.path(), "seed.csv", "id,name\n1,a\n2,b\n3,c\n");
+    let done = out_path(&lake, "done.csv");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": seed, "hasHeader": true })),
+            node("k", "snk.csv", json!({ "path": done, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    assert_eq!(r.status, "ok", "seed run failed: {:?}", r.error);
+
+    // Today's run into the same directory, stopped part way.
+    let out = out_path(&lake, "out.csv");
+    let slow = doc(
+        json!([
+            node(
+                "s",
+                "code.sql",
+                json!({ "sql": "SELECT i, md5(repeat(i::VARCHAR, 60)) AS pad FROM range(1500000) t(i)" })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    );
+    let stopper = {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            engine.request_cancel();
+        })
+    };
+    let stopped = engine.execute_pipeline(&slow);
+    stopper.join().unwrap();
+    engine.clear_cancel();
+
+    // What a downstream pipeline sees when it reads the directory.
+    let glob = lake.join("*.csv").to_string_lossy().replace('\\', "/");
+    let seen = count(&format!("read_csv_auto('{}')", glob));
+    assert!(
+        seen == 3 || (stopped.status == "ok" && seen == 1_500_003),
+        "a downstream glob of the output directory saw {seen} rows (-1 means the read failed \
+         outright): it must see the three rows that were published, or those plus a second run \
+         that completed - never a prefix of a run nobody published (stopped run status {:?})",
+        stopped.status
+    );
+
+    // And whatever the stopped run left is under a name no output glob matches.
+    let leftovers: Vec<String> = std::fs::read_dir(&lake)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "done.csv" && n != "out.csv")
+        .collect();
+    for name in &leftovers {
+        assert!(
+            name.ends_with(".duckle-partial"),
+            "a run left {name} in the output directory, where a source glob can reach it"
+        );
+    }
+}
+
+/// A published output leaves no staging file behind, on either execution path.
+#[test]
+fn a_published_output_leaves_no_staging_file_behind() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id,name\n1,a\n2,b\n");
+
+    for per_stage in [false, true] {
+        let dir = tmp.path().join(format!("out{per_stage}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = out_path(&dir, "result.csv");
+        let d = if per_stage {
+            doc(
+                json!([
+                    node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+                    node("w", "ctl.wait", json!({ "duration": 1, "unit": "milliseconds" })),
+                    node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+                ]),
+                json!([main_edge("e1", "s", "w"), main_edge("e2", "w", "k")]),
+            )
+        } else {
+            doc(
+                json!([
+                    node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+                    node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+                ]),
+                json!([main_edge("e1", "s", "k")]),
+            )
+        };
+        // Twice, because the second run publishes over an existing file.
+        for pass in 0..2 {
+            let r = engine.execute_pipeline(&d);
+            assert_eq!(r.status, "ok", "pass {pass} failed: {:?}", r.error);
+            assert_eq!(
+                count(&format!("read_csv_auto('{}')", out)),
+                2,
+                "the destination must hold the published rows (per_stage {per_stage}, pass {pass})"
+            );
+            let staged: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".duckle-partial"))
+                .collect();
+            assert!(
+                staged.is_empty(),
+                "a finished run left its staging file behind: {staged:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.
