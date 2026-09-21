@@ -4307,6 +4307,11 @@ pub(crate) fn rename_pairs(props: &JsonValue) -> Vec<(String, String)> {
 fn parse_rename_map_file(path: &str) -> Result<Vec<(String, String)>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Rename: could not read mapping file '{}': {}", path, e))?;
+    // A byte order mark is not whitespace, so `trim` left it on the FIRST
+    // old-name: the CSV header stopped being recognised as a header, and the
+    // stage asked DuckDB to EXCLUDE a column that does not exist - a binder
+    // error naming a column that prints exactly like the right one.
+    let content = crate::format::strip_bom(&content);
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())

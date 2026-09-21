@@ -1928,6 +1928,43 @@
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A mapping file written by a Windows tool renames the right column.
+    ///
+    /// A UTF-8 BOM is not whitespace, so `trim` left it on the FIRST old-name.
+    /// The CSV header then stopped being recognised as a header and became a
+    /// rename pair, and the stage asked DuckDB to EXCLUDE a column that does
+    /// not exist - a binder error naming a column that PRINTS as the right one.
+    #[test]
+    fn a_mapping_file_with_a_byte_order_mark_renames_the_right_column() {
+        let mut ni = NodeInputs::default();
+        ni.ports.insert("main".into(), vec!["up".into()]);
+        let dir = tempfile::tempdir().unwrap();
+        let build = |p: &std::path::Path| {
+            build_rename(&ni, &serde_json::json!({ "mappingFile": p.to_string_lossy() }))
+        };
+
+        // CSV, whose header row must still be recognised as one.
+        let csv_path = dir.path().join("map.csv");
+        std::fs::write(&csv_path, b"\xef\xbb\xbfold,new\nx,ex\n").unwrap();
+        let csv = build(&csv_path).unwrap();
+        assert!(!csv.contains('\u{feff}'), "the mark reached the SQL: {csv:?}");
+        assert!(csv.contains("\"x\" AS \"ex\""), "got: {csv}");
+        assert!(!csv.contains("AS \"new\""), "the header row became a rename pair: {csv}");
+        assert!(csv.contains("EXCLUDE (\"x\")"), "only the mapped column is excluded: {csv}");
+
+        // JSON, which serde refuses outright with a message blaming the file.
+        let json_path = dir.path().join("map.json");
+        std::fs::write(&json_path, b"\xef\xbb\xbf{\"a\":\"alpha\"}").unwrap();
+        let json = build(&json_path).expect("a marked JSON map is still valid JSON");
+        assert!(json.contains("\"a\" AS \"alpha\""), "got: {json}");
+
+        // YAML, where the mark rides on the first key.
+        let yaml_path = dir.path().join("map.yaml");
+        std::fs::write(&yaml_path, b"\xef\xbb\xbfa: alpha\n").unwrap();
+        let yaml = build(&yaml_path).unwrap();
+        assert!(yaml.contains("\"a\" AS \"alpha\""), "got: {yaml}");
+    }
+
     #[test]
     fn a_filter_that_ranks_rows_goes_where_ranking_is_allowed() {
         // A legacy job limits a loop by asking for a running sequence number and keeping

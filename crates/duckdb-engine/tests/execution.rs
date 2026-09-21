@@ -11348,6 +11348,37 @@ fn rename_via_mapping_file_live() {
     assert_eq!(scalar_string(&format!("SELECT CAST(alpha AS VARCHAR) FROM read_csv_auto('{}')", out)), "1");
 }
 
+/// The binder error itself: a marked mapping file must still bind.
+///
+/// The bad old-name reaches the SQL through `quote_ident`, so DuckDB is asked to
+/// EXCLUDE a column that does not exist and the run fails on a name that prints
+/// exactly like the real one.
+#[test]
+fn a_rename_mapping_file_with_a_byte_order_mark_still_binds() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "a,b,c\n1,2,3\n");
+    let map_path = tmp.path().join("map.csv");
+    std::fs::write(&map_path, b"\xef\xbb\xbfold,new\na,alpha\nc,gamma\n").unwrap();
+    let map = out_path(tmp.path(), "map.csv");
+    let out = out_path(tmp.path(), "out.csv");
+    assert!(map_path.exists());
+    let d = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("r", "xf.rename", json!({ "mappingFile": map })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "r"), main_edge("e2", "r", "k")]),
+    );
+    let res = engine.execute_pipeline(&d);
+    assert_eq!(res.status, "ok", "three bytes broke the bind: {:?}", res.error);
+    let header = std::fs::read_to_string(&out).unwrap().lines().next().unwrap_or_default().to_string();
+    // The stage EXCLUDEs the renamed columns from the star and appends the
+    // aliases, so the renamed pair lands after the untouched one.
+    assert_eq!(header, "b,alpha,gamma", "the renames did not land: {header}");
+}
+
 /// #84: spatial functions in a SQL Template over a CSV source - the spatial
 /// extension auto-loads because the SQL references ST_Point.
 #[test]
