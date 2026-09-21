@@ -90,8 +90,23 @@ jobs:
           (cd unsigned && sha256sum *.exe | tee ../unsigned.sha256)
 
       # SignPath fetches the artifact from the GitHub API, so it has to be
-      # uploaded first. `upload-artifact` zips what it is given, which is why the
-      # artifact configuration in SignPath has a <zip-file> root element.
+      # uploaded first. `upload-artifact` ZIPS what it is given - its `archive`
+      # input defaults to true, and setting it false permits only a single file,
+      # so it cannot carry both architectures - which means the project's
+      # artifact configuration must have a <zip-file> root:
+      #
+      #   <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+      #     <zip-file>
+      #       <pe-file path="Duckle-windows-x64.exe"><authenticode-sign /></pe-file>
+      #       <pe-file path="Duckle-windows-arm64.exe"><authenticode-sign /></pe-file>
+      #     </zip-file>
+      #   </artifact-configuration>
+      #
+      # A new SignPath project starts with an "Initial version" configuration
+      # typed as a bare Portable Executable, which rejects a zip. Paste the above
+      # over it: it is the project DEFAULT, so this action needs no
+      # artifact-configuration-slug. The paths are checked, so a release missing
+      # either architecture fails the request rather than half-signing it.
       - name: Upload them for SignPath to fetch
         id: unsigned
         uses: actions/upload-artifact@v7
@@ -106,7 +121,7 @@ jobs:
           # The organization id is the first GUID in an app.signpath.io/Web/<id>/ URL.
           organization-id: 'b2937071-f92b-4e09-a7dc-0ead0fcd1267'
           # Set the repository variables to override these without editing the file.
-          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG || ''duckle-oss'' }}'
+          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG || ''duckle'' }}'
           signing-policy-slug: '${{ inputs.signing_policy }}'
           github-artifact-id: '${{ steps.unsigned.outputs.artifact-id }}'
           wait-for-completion: true
@@ -116,6 +131,14 @@ jobs:
         run: |
           set -e
           ls -l signed
+          # `for f in signed/*.exe` over an empty directory iterates zero times
+          # and exits 0, so the count is the check, not the loop. The action
+          # extracts the signed zip here (`skip-decompress` defaults to false);
+          # if that ever changes, this is what catches it.
+          have=$(ls -1 signed/*.exe 2>/dev/null | wc -l)
+          want=$(wc -l < unsigned.sha256)
+          [ "$have" -eq "$want" ] || {
+            echo "::error::signed $want asset(s) but got $have back"; exit 1; }
           fail=0
           for f in signed/*.exe; do
             name="$(basename "$f")"
