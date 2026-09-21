@@ -6,6 +6,7 @@
 //! can read and react to it.
 
 use crate::catalog;
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::trust::{declared_columns, looks_like_pii, structural_risks};
 use duckle_duckdb_engine::{compile_pipeline_sql, DuckdbEngine, PipelineDoc};
 use serde_json::{json, Value};
@@ -643,7 +644,7 @@ fn load_side(args: &Value, inline: &str, path: &str) -> Result<Value, String> {
         Ok(p.clone())
     } else if let Some(pth) = arg_str(args, path) {
         let text = std::fs::read_to_string(pth).map_err(|e| format!("read {pth}: {e}"))?;
-        serde_json::from_str(&text).map_err(|e| format!("parse {pth}: {e}"))
+        serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {pth}: {e}"))
     } else {
         Err(format!("provide '{inline}' (object) or '{path}' (string)"))
     }
@@ -1052,7 +1053,7 @@ fn register_pipeline_in_repo(ws: &str, id: &str, name: &str) -> bool {
     let repo_path = std::path::Path::new(ws).join("repository.json");
     let mut repo: Value = std::fs::read_to_string(&repo_path)
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|t| serde_json::from_str(strip_bom(&t)).ok())
         .unwrap_or_else(|| json!([]));
     let arr = match repo.as_array_mut() {
         Some(a) => a,
@@ -1167,8 +1168,8 @@ fn t_update_pipeline(args: &Value) -> Result<Value, String> {
         return Err("provide 'path', or 'workspace' + 'id'".to_string());
     };
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc_val: Value =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc_val: Value = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
     merge_pipeline(&mut doc_val, patch);
 
     let mut validation = Value::Null;
@@ -1432,7 +1433,7 @@ fn t_list_pipelines(args: &Value) -> Result<Value, String> {
             Ok(t) => t,
             Err(_) => continue,
         };
-        let v: Value = match serde_json::from_str(&text) {
+        let v: Value = match serde_json::from_str(strip_bom(&text)) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -1451,7 +1452,7 @@ fn t_list_pipelines(args: &Value) -> Result<Value, String> {
 fn t_read_pipeline(args: &Value) -> Result<Value, String> {
     let path = arg_str(args, "path").ok_or("missing 'path'")?;
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))
+    serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {path}: {e}"))
 }
 
 /// Backfill over MCP, so an agent can inspect and replay without a GUI.
@@ -1676,7 +1677,7 @@ fn t_create_connection(args: &Value) -> Result<Value, String> {
     let repo_path = std::path::Path::new(ws).join("repository.json");
     let mut registered = false;
     if let Ok(text) = std::fs::read_to_string(&repo_path) {
-        if let Ok(mut repo) = serde_json::from_str::<Value>(&text) {
+        if let Ok(mut repo) = serde_json::from_str::<Value>(strip_bom(&text)) {
             if let Some(arr) = repo.as_array_mut() {
                 arr.push(json!({ "id": id, "name": name, "type": "connection" }));
                 if std::fs::write(&repo_path, serde_json::to_string_pretty(&repo).unwrap_or_default())
@@ -1803,7 +1804,8 @@ fn load_pipeline_value(args: &Value) -> Result<(Value, String), String> {
         Ok((p.clone(), name))
     } else if let Some(path) = arg_str(args, "path") {
         let text = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
+        let v: Value = serde_json::from_str(strip_bom(&text))
+            .map_err(|e| format!("parse {path}: {e}"))?;
         let name = v
             .get("name")
             .and_then(|x| x.as_str())
@@ -2629,5 +2631,51 @@ mod freshness_tool {
             "reading freshness recorded a verdict, which would make an agent's question \
              change what the next alert says"
         );
+    }
+}
+
+#[cfg(test)]
+mod repository_registration {
+    use super::*;
+
+    /// Registering a pipeline must not eat the rest of repository.json.
+    ///
+    /// The read is `.ok().and_then(|t| from_str(&t).ok()).unwrap_or_else(|| json!([]))`,
+    /// so a file that will not parse becomes an EMPTY array, which is then
+    /// written back holding the one new entry. A UTF-8 BOM - what PowerShell,
+    /// Notepad and Excel write by default - is not valid JSON, so one
+    /// successful create_pipeline destroyed every other pipeline and connection
+    /// registration in the workspace.
+    #[test]
+    fn registering_a_pipeline_keeps_what_a_bom_made_unreadable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let repo = serde_json::to_string_pretty(&json!([
+            { "id": "orders", "name": "Orders", "type": "pipeline" },
+            { "id": "sales", "name": "Sales", "type": "pipeline" }
+        ]))
+        .unwrap();
+        std::fs::write(
+            ws.join("repository.json"),
+            [b"\xef\xbb\xbf".as_slice(), repo.as_bytes()].concat(),
+        )
+        .unwrap();
+
+        assert!(register_pipeline_in_repo(&ws.to_string_lossy(), "new", "New"));
+
+        let text = std::fs::read_to_string(ws.join("repository.json")).unwrap();
+        let after: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+            .expect("what was written back is JSON");
+        let ids: Vec<&str> = after
+            .as_array()
+            .expect("repository.json is an array")
+            .iter()
+            .filter_map(|e| e.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"orders") && ids.contains(&"sales"),
+            "registering `new` destroyed the existing registrations: {ids:?}"
+        );
+        assert!(ids.contains(&"new"), "the new pipeline was not registered: {ids:?}");
     }
 }

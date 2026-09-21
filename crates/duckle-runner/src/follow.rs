@@ -34,6 +34,7 @@
 //! BETWEEN passes, so a shutdown never lands in the middle of a sink write with
 //! the position half-advanced.
 
+use duckle_duckdb_engine::format::strip_bom;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,7 +157,7 @@ pub fn next_step(outcome: &BatchOutcome, opts: &FollowOptions, passes: u64) -> (
 fn load_base_doc(pipeline: &Path, workspace: &Path) -> Result<PipelineDoc, String> {
     let text = std::fs::read_to_string(pipeline)
         .map_err(|e| format!("read {}: {}", pipeline.display(), e))?;
-    let mut doc: PipelineDoc = serde_json::from_str(&text)
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
         .map_err(|e| format!("parse {}: {}", pipeline.display(), e))?;
     duckle_secrets::resolve_connection_refs(workspace, &mut doc.nodes)?;
     let env_file = workspace.join("secrets.env");

@@ -76,6 +76,14 @@ pub fn version_of(doc: &Value) -> u32 {
     doc.get("formatVersion").and_then(Value::as_u64).unwrap_or(0).min(u32::MAX as u64) as u32
 }
 
+/// A pipeline document without its byte order mark.
+///
+/// PowerShell, Notepad and Excel write one by default, and a BOM is never valid
+/// JSON, so this can only turn a refusal into a read.
+pub fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Whether this build can be trusted with the document.
 pub fn check(doc: &Value) -> Result<u32, TooNew> {
     let found = version_of(doc);

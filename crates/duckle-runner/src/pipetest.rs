@@ -42,6 +42,7 @@
 //! the run preview, which the engine caps at 100 rows - so a case expecting 100 rows
 //! passed while the node produced 101.
 
+use duckle_duckdb_engine::format::strip_bom;
 use serde_json::Value as JsonValue;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -498,7 +499,7 @@ fn run_case(
         Ok(t) => t,
         Err(e) => return Some(format!("cannot read {}: {e}", pipeline.display())),
     };
-    let mut doc: JsonValue = match serde_json::from_str(&text) {
+    let mut doc: JsonValue = match serde_json::from_str(strip_bom(&text)) {
         Ok(d) => d,
         Err(e) => return Some(format!("{} is not valid JSON: {e}", pipeline.display())),
     };

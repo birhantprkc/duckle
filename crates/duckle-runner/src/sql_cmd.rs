@@ -5,6 +5,7 @@
 //! `analyze_pipeline_sql` the editor and MCP call, so the three cannot come to
 //! disagree about whether a pipeline is sound.
 
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::{DuckdbEngine, PipelineDoc};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -47,7 +48,7 @@ pub fn run() -> ExitCode {
 
     let doc: PipelineDoc = match std::fs::read_to_string(&path)
         .map_err(|e| format!("read: {e}"))
-        .and_then(|t| serde_json::from_str(&t).map_err(|e| format!("parse: {e}")))
+        .and_then(|t| serde_json::from_str(strip_bom(&t)).map_err(|e| format!("parse: {e}")))
     {
         Ok(d) => d,
         Err(e) => {

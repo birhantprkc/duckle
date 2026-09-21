@@ -19,6 +19,7 @@
 //! any pipeline in the workspace, so it is open only on loopback and refuses
 //! to start on any other host without a credential: see console_auth.
 
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::{load_run_history, DuckdbEngine, PipelineDoc, RunRecord};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -748,7 +749,7 @@ fn dispatch_fs(state: &WebState, op: &str, body: &[u8]) -> Reply {
     match op {
         "exists" => respond_json(&serde_json::json!({ "exists": target.exists() })),
         "read" => match std::fs::read_to_string(&target) {
-            Ok(content) => respond_json(&serde_json::json!({ "content": content })),
+            Ok(content) => respond_json(&serde_json::json!({ "content": strip_bom(&content) })),
             Err(e) => respond_err("404 Not Found", &e.to_string()),
         },
         "write" => {
@@ -3025,7 +3026,7 @@ fn discover_pipelines(workspace: &Path) -> Vec<(PathBuf, String, Value)> {
             Ok(t) => t,
             Err(_) => continue,
         };
-        let v: Value = match serde_json::from_str(&text) {
+        let v: Value = match serde_json::from_str(strip_bom(&text)) {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -3284,7 +3285,8 @@ fn api_runs(state: &State, only: Option<&str>) -> Value {
 fn read_pipeline_file(state: &State, file: &str) -> Result<Value, String> {
     let path = resolve_in_workspace(&state.workspace, file)?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let doc: Value = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let doc: Value = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
     // Confining to the workspace is not enough on its own. This route is rated
     // for viewers, and the workspace also holds `.duckle/console-users.json`
     // and `connections/*.json`, so "any JSON inside the workspace" handed the
@@ -3819,8 +3821,8 @@ fn parse_run_params(v: Option<&Value>) -> HashMap<String, String> {
 fn discover_pipeline_params(state: &State, file: &str) -> Result<Vec<String>, String> {
     let path = resolve_in_workspace(&state.workspace, file)?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let doc: PipelineDoc =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
     Ok(duckle_duckdb_engine::context::discover_parameters(&doc))
 }
 
@@ -4178,7 +4180,8 @@ fn execute_one_with(
 ) -> Result<Value, String> {
     let path = resolve_in_workspace(&state.workspace, file)?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
-    let mut doc: PipelineDoc = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))?;
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {}", path.display(), e))?;
 
     let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "pipeline".into());
 

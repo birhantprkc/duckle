@@ -15,6 +15,7 @@
 //!
 //! Exit code: 0 on success, 1 on pipeline error, 2 on usage/IO error.
 
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::{DuckdbEngine, PipelineDoc};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -444,7 +445,7 @@ fn run_with(args: Args) -> Result<bool, String> {
     }
     let text = std::fs::read_to_string(&pipeline)
         .map_err(|e| format!("read {}: {}", pipeline.display(), e))?;
-    let mut doc: PipelineDoc = serde_json::from_str(&text)
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
         .map_err(|e| format!("parse {}: {}", pipeline.display(), e))?;
     // #305: taken HERE, before the resolution passes below. apply_time_builtins
     // stamps a fresh date into the document on every run, so a hash taken after
@@ -1626,7 +1627,8 @@ Refusing rather than reporting a clean run.",
         let outcome = std::fs::read_to_string(path)
             .map_err(|e| format!("read: {e}"))
             .and_then(|text| {
-                serde_json::from_str::<PipelineDoc>(&text).map_err(|e| format!("parse: {e}"))
+                serde_json::from_str::<PipelineDoc>(strip_bom(&text))
+                    .map_err(|e| format!("parse: {e}"))
             })
             .and_then(|doc| {
                 // #298: a dead property is not a compile error - the pipeline
@@ -1765,8 +1767,8 @@ fn run_side_for_review(
     engine: &DuckdbEngine,
 ) -> Result<std::collections::BTreeMap<String, Option<u64>>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: PipelineDoc =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
     // Sink-safety: drop every sink node (and any edge touching it) so the run
     // cannot write to a destination.
     let sink_ids: std::collections::HashSet<String> = doc
@@ -1861,7 +1863,7 @@ fn run_review() -> Result<i32, String> {
 
     let load = |p: &Path| -> Result<serde_json::Value, String> {
         let text = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", p.display()))
+        serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {}: {e}", p.display()))
     };
     let bv = load(&before)?;
     let av = load(&after)?;
@@ -2704,7 +2706,7 @@ fn run_retry() -> ExitCode {
     let pipeline = PathBuf::from(&prior.pipeline_path);
     let doc: duckle_duckdb_engine::PipelineDoc = match std::fs::read_to_string(&pipeline)
         .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .and_then(|t| serde_json::from_str(strip_bom(&t)).map_err(|e| e.to_string()))
     {
         Ok(d) => d,
         Err(e) => {

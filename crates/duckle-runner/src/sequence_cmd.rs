@@ -7,6 +7,7 @@
 //! slice generator over the existing ledger rather than a second job system.
 
 use duckle_duckdb_engine::backfill::{self, Backfill, Kind};
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::sequence::{self, Status};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -81,7 +82,7 @@ pub fn run() -> ExitCode {
     let Some(args) = parse() else { return usage() };
     let doc: serde_json::Value = match std::fs::read_to_string(&args.path)
         .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .and_then(|t| serde_json::from_str(strip_bom(&t)).map_err(|e| e.to_string()))
     {
         Ok(d) => d,
         Err(e) => {

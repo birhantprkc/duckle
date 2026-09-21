@@ -5,6 +5,7 @@
 //! rewrites a Git-managed production workspace on sight is one people run once
 //! and then never trust again.
 
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::format;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -98,7 +99,9 @@ fn survey(workspace: &Path) -> Result<(Vec<Plan>, Vec<String>), String> {
     let mut plans = Vec::new();
     let mut refused = Vec::new();
     for path in pipeline_files(workspace) {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path).map(|t| strip_bom(&t).to_string()) else {
+            continue;
+        };
         let Ok(doc) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
         // The same test the catalog uses for "is this a pipeline".
         if doc.get("nodes").and_then(|n| n.as_array()).is_none() {

@@ -7,6 +7,7 @@
 //! because this is a child module of the crate root.
 
 use crate::*;
+use crate::format::strip_bom;
 
 /// Render one row into a line for a text / raw HTTP body (issue #147),
 /// substituting `${column}` placeholders with the row's values. Missing keys and
@@ -16487,7 +16488,7 @@ impl DuckdbEngine {
             ).collect()
         };
         content = substitute_into_child(&content, &merged);
-        let sub_doc: plan::PipelineDoc = serde_json::from_str(&content).map_err(|e| {
+        let sub_doc: plan::PipelineDoc = serde_json::from_str(strip_bom(&content)).map_err(|e| {
             EngineError::Config(format!("sub-pipeline: parse '{}': {}", path, e))
         })?;
         // Run it under the CHILD's own name. Unnamed, every sub-pipeline shared

@@ -8,6 +8,7 @@
 //! value came from the slice rather than from them.
 
 use duckle_duckdb_engine::backfill::{self, Backfill, PartitionRun, State};
+use duckle_duckdb_engine::format::strip_bom;
 use duckle_duckdb_engine::{partition, PipelineDoc};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -110,9 +111,9 @@ pub fn run() -> ExitCode {
 fn read_doc(path: &Path) -> Result<(serde_json::Value, PipelineDoc), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let raw: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        serde_json::from_str(strip_bom(&text)).map_err(|e| format!("{}: {e}", path.display()))?;
     let doc: PipelineDoc =
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        serde_json::from_str(strip_bom(&text)).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((raw, doc))
 }
 

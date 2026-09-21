@@ -6,6 +6,7 @@
 //! give stable semantics, before anything touches a database.
 
 use duckle_duckdb_engine::chunking::{self, Bounds, Snapshot, Strategy};
+use duckle_duckdb_engine::format::strip_bom;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -62,7 +63,7 @@ pub fn run() -> ExitCode {
 
     let doc: serde_json::Value = match std::fs::read_to_string(&path)
         .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        .and_then(|t| serde_json::from_str(strip_bom(&t)).map_err(|e| e.to_string()))
     {
         Ok(d) => d,
         Err(e) => {

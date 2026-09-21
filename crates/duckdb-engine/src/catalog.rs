@@ -23,6 +23,7 @@
 //! it looks complete. Anything asking this module a governance question should
 //! show that list alongside the result.
 
+use crate::format::strip_bom;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -202,7 +203,7 @@ pub fn documents_at_revision(workspace: &Path, rev: &str) -> Result<Vec<(String,
         // that is a subdirectory of the repository works without the caller
         // knowing where the repository root is.
         let Ok(text) = git(workspace, &["show", &format!("{rev}:./{rel}")]) else { continue };
-        let Ok(doc): Result<Value, _> = serde_json::from_str(&text) else { continue };
+        let Ok(doc): Result<Value, _> = serde_json::from_str(strip_bom(&text)) else { continue };
         if doc.get("nodes").and_then(|n| n.as_array()).is_none() {
             continue;
         }
@@ -1033,7 +1034,7 @@ pub fn document_paths(workspace: &Path) -> Vec<(String, PathBuf, Value)> {
     let mut docs: Vec<(String, PathBuf, Value)> = Vec::new();
     for path in discover_pipeline_files(workspace) {
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let Ok(doc): Result<Value, _> = serde_json::from_str(&text) else { continue };
+        let Ok(doc): Result<Value, _> = serde_json::from_str(strip_bom(&text)) else { continue };
         if doc.get("nodes").and_then(|n| n.as_array()).is_none() {
             continue;
         }
@@ -1467,6 +1468,41 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let doc = json!({ "name": id, "nodes": nodes, "edges": [] });
         std::fs::write(dir.join(format!("{id}.json")), doc.to_string()).unwrap();
+    }
+
+    /// A pipeline saved by a Windows tool is still in the catalog.
+    ///
+    /// The parse here is a `let Ok(..) else { continue }`, so a file it cannot
+    /// read is dropped without a word to anyone - and a UTF-8 BOM, which
+    /// PowerShell, Notepad and Excel write by default, is not valid JSON. That
+    /// is the same silence the comment on `document_paths` already records:
+    /// `validate --affected` reports nothing affected and exits 0.
+    #[test]
+    fn a_pipeline_with_a_byte_order_mark_is_still_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let dir = ws.join("pipelines");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = json!({
+            "name": "orders",
+            "nodes": [node("s", "src.csv", json!({ "path": "a.csv" }))],
+            "edges": []
+        })
+        .to_string();
+        std::fs::write(dir.join("plain.json"), doc.as_bytes()).unwrap();
+        std::fs::write(
+            dir.join("bom.json"),
+            [b"\xef\xbb\xbf".as_slice(), doc.as_bytes()].concat(),
+        )
+        .unwrap();
+
+        let found = document_paths(ws);
+        let ids: Vec<&str> = found.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(ids.contains(&"plain"), "the control must be found: {ids:?}");
+        assert!(
+            ids.contains(&"bom"),
+            "a BOM'd pipeline vanished from the catalog without a word: {ids:?}"
+        );
     }
 
     fn node(id: &str, component: &str, props: Value) -> Value {

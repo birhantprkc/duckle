@@ -5,6 +5,7 @@
 //! `duckle_duckdb_engine::drift`; this command resolves placeholders the same
 //! way a real run does, then prints the report (text or JSON).
 
+use duckle_duckdb_engine::format::strip_bom;
 use std::path::PathBuf;
 
 use duckle_duckdb_engine::{context, drift, DuckdbEngine, PipelineDoc};
@@ -64,8 +65,8 @@ pub fn run() -> Result<i32, String> {
     let pipeline = pipeline.ok_or("--pipeline <file.json> is required")?;
     let text = std::fs::read_to_string(&pipeline)
         .map_err(|e| format!("read {}: {e}", pipeline.display()))?;
-    let mut doc: PipelineDoc =
-        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", pipeline.display()))?;
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("parse {}: {e}", pipeline.display()))?;
 
     // Resolve placeholders the same way a headless run does so source paths
     // (${ENV:...}, ${workspace}, ${date}) point at the real data.

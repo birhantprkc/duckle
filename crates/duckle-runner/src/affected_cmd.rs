@@ -8,6 +8,7 @@
 
 use duckle_duckdb_engine::affected::{self, Reason, SharedChange};
 use duckle_duckdb_engine::catalog;
+use duckle_duckdb_engine::format::strip_bom;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -53,7 +54,7 @@ fn read_at(workspace: &Path, rev: &str, rel: &str) -> Option<String> {
 fn context_digest(text: &str) -> BTreeMap<String, u64> {
     use std::hash::{Hash, Hasher};
     let mut out = BTreeMap::new();
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(text) else { return out };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(strip_bom(text)) else { return out };
     let Some(vars) = doc.get("variables").and_then(|v| v.as_array()) else { return out };
     for v in vars {
         let Some(key) = v.get("key").and_then(|k| k.as_str()) else { continue };

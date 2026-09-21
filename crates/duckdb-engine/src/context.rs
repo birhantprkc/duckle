@@ -13,6 +13,7 @@
 //! itself (a naive port reading only repository.json would see zero vars).
 
 use crate::PipelineDoc;
+use crate::format::strip_bom;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -85,7 +86,7 @@ fn read_repo(workspace: &Path) -> Result<Vec<RepoItem>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("read {}: {}", path.display(), e)),
     };
-    serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", path.display(), e))
+    serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {}: {}", path.display(), e))
 }
 
 /// Dynamic date/time builtins so source / sink paths can carry a timestamp
@@ -1065,7 +1066,7 @@ fn resolve_workspace_impl(
         .join(format!("{}.json", pipeline_id));
     let text = std::fs::read_to_string(&pipe_path)
         .map_err(|e| format!("read {}: {}", pipe_path.display(), e))?;
-    let mut doc: PipelineDoc = serde_json::from_str(&text)
+    let mut doc: PipelineDoc = serde_json::from_str(strip_bom(&text))
         .map_err(|e| format!("parse {}: {}", pipe_path.display(), e))?;
 
     // Compile the placeholder regex once and capture vars for the closure.
