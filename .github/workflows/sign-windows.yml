@@ -1,0 +1,152 @@
+# Authenticode-sign the Windows release assets through SignPath.
+#
+# Deliberately NOT wired into `release` yet. The SignPath Foundation release
+# certificate is still CSR PENDING: the key lives in their HSM and the CA has
+# not issued the certificate, which is SignPath's side of the process, not ours.
+# The TEST certificate that is valid today is not publicly trusted, and a
+# test-signed exe presents a signature from an untrusted publisher - worse for a
+# user than an unsigned one. So this runs only when asked, and only replaces
+# release assets when explicitly told to.
+#
+# What it does prove, before the real certificate exists: the trusted build
+# system link, the artifact configuration, the API token, the artifact hand-off
+# and signed bytes coming back.
+#
+# WHEN THE RELEASE CERTIFICATE GOES VALID:
+#   1. call this from release.yml between `build` and `checksums`:
+#        sign-windows:
+#          needs: build
+#          uses: ./.github/workflows/sign-windows.yml
+#          with: { release_tag: "${{ needs.prepare-release.outputs.tag }}" }
+#          secrets: inherit
+#   2. add `sign-windows` to the `checksums` job's `needs`. SHA256SUMS.txt must
+#      cover the SIGNED bytes: the self-updater verifies the download against
+#      it, so sums taken before signing would reject every signed asset.
+#   3. note that `checksums` has `if: ${{ !cancelled() }}`, which runs even when
+#      a dependency FAILED - decide whether a failed signing should still
+#      publish sums, and tighten that condition if not.
+#
+# Signing the outer exe does NOT sign the embedded sidecars: duckle-runner.exe,
+# duckle-mcp.exe and duckle-lance.exe are staged into apps/desktop/bin/ and
+# embedded with include_bytes! + zstd, so the copies extracted at run time stay
+# unsigned. Signing those needs a round trip inside each build leg, before the
+# desktop build embeds them.
+
+name: Sign Windows assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag whose Windows assets to sign'
+        required: true
+      signing_policy:
+        description: 'SignPath signing policy slug'
+        required: false
+        default: 'test-signing'
+      publish:
+        description: 'Replace the release assets with the signed ones (leave OFF for a test certificate)'
+        type: boolean
+        required: false
+        default: false
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      signing_policy:
+        required: false
+        type: string
+        default: 'release-signing'
+      publish:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      SIGNPATH_API_TOKEN:
+        required: true
+
+jobs:
+  sign:
+    # Linux on purpose: the signing happens in SignPath's HSM, so nothing here
+    # needs Windows tooling, and this keeps the Node action off the
+    # windows-11-arm runner that the release matrix uses.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the unsigned Windows assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REL_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -e
+          mkdir -p unsigned
+          gh release download "$REL_TAG" --pattern 'Duckle-windows-*.exe' --dir unsigned
+          ls -l unsigned
+          # A silent empty download would sail through signing and prove nothing.
+          [ -n "$(ls -A unsigned)" ] || { echo "::error::no Duckle-windows-*.exe on $REL_TAG"; exit 1; }
+          (cd unsigned && sha256sum *.exe | tee ../unsigned.sha256)
+
+      # SignPath fetches the artifact from the GitHub API, so it has to be
+      # uploaded first. `upload-artifact` zips what it is given, which is why the
+      # artifact configuration in SignPath has a <zip-file> root element.
+      - name: Upload them for SignPath to fetch
+        id: unsigned
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckle-windows-unsigned
+          path: unsigned/*.exe
+
+      - name: Submit signing request
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          # The organization id is the first GUID in an app.signpath.io/Web/<id>/ URL.
+          organization-id: 'b2937071-f92b-4e09-a7dc-0ead0fcd1267'
+          # Set the repository variables to override these without editing the file.
+          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG || ''duckle-oss'' }}'
+          signing-policy-slug: '${{ inputs.signing_policy }}'
+          github-artifact-id: '${{ steps.unsigned.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed'
+
+      - name: Check the bytes actually came back signed
+        run: |
+          set -e
+          ls -l signed
+          fail=0
+          for f in signed/*.exe; do
+            name="$(basename "$f")"
+            before="$(grep " $name\$" unsigned.sha256 | cut -d' ' -f1)"
+            after="$(sha256sum "$f" | cut -d' ' -f1)"
+            if [ "$before" = "$after" ]; then
+              echo "::error::$name came back byte-identical, so nothing was signed"
+              fail=1
+            else
+              echo "ok: $name changed ($before -> $after)"
+            fi
+          done
+          [ "$fail" = 0 ]
+
+      - name: Keep the signed assets as a build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: duckle-windows-signed
+          path: signed/*.exe
+
+      # Off by default from the dispatch form: a test-signed asset must never
+      # reach a release, because an untrusted publisher signature is worse for a
+      # user than no signature at all.
+      - name: Replace the release assets with the signed ones
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          REL_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -e
+          for f in signed/*.exe; do
+            gh release upload "$REL_TAG" "$f" --clobber
+          done
