@@ -109,22 +109,49 @@ pub fn workspace_key(workspace: &Path, create: bool) -> Result<[u8; 32], String>
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // Someone got there first. Theirs is the key every other process in
             // this workspace will read, so this one uses it too.
-            let bytes = std::fs::read(&path).map_err(|e| format!("read key: {}", e))?;
-            if bytes.len() != 32 {
-                // Reported rather than replaced: a new key here would make every
-                // secret already sealed in this workspace unopenable, silently.
+            adopt_existing_key(&path)
+        }
+        Err(e) => Err(format!("create key: {}", e)),
+    }
+}
+
+/// Read the key another process just claimed, waiting for it to be written.
+///
+/// Creating the file and writing it are two steps, so the process that lost the
+/// race can arrive between them and find the name taken and the file EMPTY.
+/// Treating that instant as corruption is wrong - the bytes are moments away -
+/// and it is not hypothetical: the concurrent-minting test passes on Windows by
+/// timing and failed on Linux and macOS, every racer panicking on a 0-byte read.
+///
+/// So this waits, briefly, for the size the file is about to have. A file that
+/// never reaches 32 bytes is reported rather than replaced: minting a new key
+/// over it would make every secret already sealed in this workspace unopenable,
+/// silently. That also covers the one case waiting cannot fix, a process killed
+/// between the create and the write, which leaves a key nobody can complete.
+fn adopt_existing_key(path: &Path) -> Result<[u8; 32], String> {
+    // ~500ms in total, which is far longer than the window and still short
+    // enough that a genuinely empty key file reports quickly.
+    for attempt in 0..50 {
+        match std::fs::read(path) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut on_disk = [0u8; 32];
+                on_disk.copy_from_slice(&bytes);
+                return Ok(on_disk);
+            }
+            Ok(_) | Err(_) if attempt < 49 => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(bytes) => {
                 return Err(format!(
                     "workspace key at {} is {} bytes, not 32",
                     path.display(),
                     bytes.len()
-                ));
+                ))
             }
-            let mut on_disk = [0u8; 32];
-            on_disk.copy_from_slice(&bytes);
-            Ok(on_disk)
+            Err(e) => return Err(format!("read key: {}", e)),
         }
-        Err(e) => Err(format!("create key: {}", e)),
     }
+    unreachable!("the loop returns on its last attempt")
 }
 
 pub fn is_encrypted(s: &str) -> bool {
@@ -717,6 +744,40 @@ mod tests {
         dir
     }
 
+
+    /// The process that loses the race waits for the winner's bytes.
+    ///
+    /// Creating the file and writing it are two steps. A racer that arrives
+    /// between them finds the name taken and the file EMPTY, and reading that
+    /// as corruption fails a mint that was about to succeed. This is the case
+    /// CI caught on Linux and macOS while Windows passed on timing, so it is
+    /// pinned here without a race: the file is left empty on purpose and filled
+    /// 80ms later.
+    #[test]
+    fn a_key_file_still_being_written_is_waited_for() {
+        let ws = temp_ws("mint_window");
+        let _ = std::fs::remove_dir_all(&ws);
+        let path = ws.join(".duckle").join("keys").join("secret.key");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Exactly what the winner leaves behind between create_new and write.
+        std::fs::write(&path, b"").unwrap();
+
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                std::fs::write(&path, [9u8; 32]).unwrap();
+            })
+        };
+        let k = workspace_key(&ws, true).expect("the key the winner is writing");
+        writer.join().unwrap();
+        assert_eq!(
+            k,
+            [9u8; 32],
+            "the loser must adopt the winner's key, not fail on the instant before it lands"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
 
     /// Every process that mints the workspace key at once ends up with the same
     /// key.
