@@ -26,6 +26,17 @@
 #      a dependency FAILED - decide whether a failed signing should still
 #      publish sums, and tighten that condition if not.
 #
+# ONE EXE PER SIGNING REQUEST, and nothing is ever zipped. The SignPath project's
+# artifact configuration is typed as a bare Portable Executable, which is exactly
+# what a release asset is, so the exe is handed over as-is: `upload-artifact`
+# gets `archive: false` and the matrix runs one request per architecture. That
+# input permits a single file only, which is why this is a matrix rather than one
+# request for both. No archive wrapper is introduced anywhere - not on the wire,
+# and not in a release.
+#
+# Publishing is a SEPARATE job that needs the whole matrix, so a release never
+# ends up with one architecture signed and the other not.
+#
 # Signing the outer exe does NOT sign the embedded sidecars: duckle-runner.exe,
 # duckle-mcp.exe and duckle-lance.exe are staged into apps/desktop/bin/ and
 # embedded with include_bytes! + zstd, so the copies extracted at run time stay
@@ -72,47 +83,35 @@ jobs:
     # needs Windows tooling, and this keeps the Node action off the
     # windows-11-arm runner that the release matrix uses.
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      matrix:
+        asset: [Duckle-windows-x64.exe, Duckle-windows-arm64.exe]
     steps:
-      - name: Download the unsigned Windows assets
+      - name: Download the unsigned asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           REL_TAG: ${{ inputs.release_tag }}
+          ASSET: ${{ matrix.asset }}
         run: |
           set -e
           mkdir -p unsigned
-          gh release download "$REL_TAG" --pattern 'Duckle-windows-*.exe' --dir unsigned
-          ls -l unsigned
+          gh release download "$REL_TAG" --pattern "$ASSET" --dir unsigned
           # A silent empty download would sail through signing and prove nothing.
-          [ -n "$(ls -A unsigned)" ] || { echo "::error::no Duckle-windows-*.exe on $REL_TAG"; exit 1; }
-          (cd unsigned && sha256sum *.exe | tee ../unsigned.sha256)
+          [ -f "unsigned/$ASSET" ] || { echo "::error::$ASSET is not on $REL_TAG"; exit 1; }
+          sha256sum "unsigned/$ASSET" | tee unsigned.sha256
 
       # SignPath fetches the artifact from the GitHub API, so it has to be
-      # uploaded first. `upload-artifact` ZIPS what it is given - its `archive`
-      # input defaults to true, and setting it false permits only a single file,
-      # so it cannot carry both architectures - which means the project's
-      # artifact configuration must have a <zip-file> root:
-      #
-      #   <artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
-      #     <zip-file>
-      #       <pe-file path="Duckle-windows-x64.exe"><authenticode-sign /></pe-file>
-      #       <pe-file path="Duckle-windows-arm64.exe"><authenticode-sign /></pe-file>
-      #     </zip-file>
-      #   </artifact-configuration>
-      #
-      # A new SignPath project starts with an "Initial version" configuration
-      # typed as a bare Portable Executable, which rejects a zip. Paste the above
-      # over it: it is the project DEFAULT, so this action needs no
-      # artifact-configuration-slug. The paths are checked, so a release missing
-      # either architecture fails the request rather than half-signing it.
-      - name: Upload them for SignPath to fetch
+      # uploaded first. `archive: false` uploads the exe itself rather than a zip
+      # of it, so SignPath receives a Portable Executable and the project's
+      # artifact configuration has nothing to unwrap.
+      - name: Upload it for SignPath to fetch
         id: unsigned
         uses: actions/upload-artifact@v7
         with:
-          name: duckle-windows-unsigned
-          path: unsigned/*.exe
+          name: duckle-unsigned-${{ matrix.asset }}
+          path: unsigned/${{ matrix.asset }}
+          archive: false
 
       - name: Submit signing request
         uses: signpath/github-action-submit-signing-request@v3
@@ -120,56 +119,72 @@ jobs:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           # The organization id is the first GUID in an app.signpath.io/Web/<id>/ URL.
           organization-id: 'b2937071-f92b-4e09-a7dc-0ead0fcd1267'
-          # Set the repository variables to override these without editing the file.
+          # Set the repository variable to override this without editing the file.
           project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG || ''duckle'' }}'
           signing-policy-slug: '${{ inputs.signing_policy }}'
           github-artifact-id: '${{ steps.unsigned.outputs.artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: 'signed'
+          # What comes back is a signed exe, not an archive, so there is nothing
+          # to extract and an extraction step could only misread it.
+          skip-decompress: true
 
       - name: Check the bytes actually came back signed
+        env:
+          ASSET: ${{ matrix.asset }}
         run: |
           set -e
           ls -l signed
-          # `for f in signed/*.exe` over an empty directory iterates zero times
-          # and exits 0, so the count is the check, not the loop. The action
-          # extracts the signed zip here (`skip-decompress` defaults to false);
-          # if that ever changes, this is what catches it.
-          have=$(ls -1 signed/*.exe 2>/dev/null | wc -l)
-          want=$(wc -l < unsigned.sha256)
-          [ "$have" -eq "$want" ] || {
-            echo "::error::signed $want asset(s) but got $have back"; exit 1; }
-          fail=0
-          for f in signed/*.exe; do
-            name="$(basename "$f")"
-            before="$(grep " $name\$" unsigned.sha256 | cut -d' ' -f1)"
-            after="$(sha256sum "$f" | cut -d' ' -f1)"
-            if [ "$before" = "$after" ]; then
-              echo "::error::$name came back byte-identical, so nothing was signed"
-              fail=1
-            else
-              echo "ok: $name changed ($before -> $after)"
-            fi
-          done
-          [ "$fail" = 0 ]
+          # Count first: a glob or a loop over an empty directory exits 0, so a
+          # request that returned nothing would otherwise report success.
+          have=$(find signed -type f | wc -l)
+          [ "$have" -eq 1 ] || { echo "::error::expected 1 signed file, got $have"; exit 1; }
+          f=$(find signed -type f)
+          before=$(cut -d' ' -f1 unsigned.sha256)
+          after=$(sha256sum "$f" | cut -d' ' -f1)
+          if [ "$before" = "$after" ]; then
+            echo "::error::$ASSET came back byte-identical, so nothing was signed"
+            exit 1
+          fi
+          echo "ok: $ASSET changed ($before -> $after)"
+          # SignPath names the file it returns; the release asset name is ours.
+          mkdir -p out
+          mv "$f" "out/$ASSET"
 
-      - name: Keep the signed assets as a build artifact
+      - name: Keep the signed asset as a build artifact
         uses: actions/upload-artifact@v7
         with:
-          name: duckle-windows-signed
-          path: signed/*.exe
+          name: duckle-signed-${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+          archive: false
 
-      # Off by default from the dispatch form: a test-signed asset must never
-      # reach a release, because an untrusted publisher signature is worse for a
-      # user than no signature at all.
+  # Off by default from the dispatch form: a test-signed asset must never reach a
+  # release, because an untrusted publisher signature is worse for a user than no
+  # signature at all. `needs: sign` covers the whole matrix, so a release is never
+  # left with one architecture signed and the other not.
+  publish:
+    needs: sign
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Collect the signed assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: duckle-signed-*
+          merge-multiple: true
+          path: signed
+
       - name: Replace the release assets with the signed ones
-        if: ${{ inputs.publish }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           REL_TAG: ${{ inputs.release_tag }}
         run: |
           set -e
+          have=$(find signed -type f -name '*.exe' | wc -l)
+          [ "$have" -eq 2 ] || { echo "::error::expected 2 signed exe, got $have"; exit 1; }
           for f in signed/*.exe; do
             gh release upload "$REL_TAG" "$f" --clobber
           done
