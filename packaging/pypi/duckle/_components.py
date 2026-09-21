@@ -429,6 +429,11 @@ COMPONENTS = {
         'summary': 'Write rows to a Lance table (create/overwrite or append) via the bundled duckle-lance sidecar.',
         'params': ['uri', 'table', 'mode', 'apiKey', 'region'],
     },
+    'snk.manticore': {
+        'kind': 'sink',
+        'summary': 'Index rows into a Manticore table via the HTTP JSON /bulk API (port 9308). NDJSON, one line per row, with the document nested inside the action ({"insert":{"table":"t","doc":{...}}}) - not Elasticsearch\'s action/doc pair. Insert or replace (upsert by id), batched at 1000 rows. A batch Manticore r...',
+        'params': ['endpoint', 'table', 'username', 'password', 'writeMode', 'batchSize'],
+    },
     'snk.mariadb': {
         'kind': 'sink',
         'summary': 'Write to MariaDB via the DuckDB mysql extension (MariaDB speaks the MySQL wire protocol)',
@@ -587,7 +592,7 @@ COMPONENTS = {
     'snk.spatial': {
         'kind': 'sink',
         'summary': 'Write geospatial files via the spatial extension',
-        'params': ['path', 'driver', 'encoding'],
+        'params': ['path', 'driver', 'encoding', 'hilbertColumn'],
     },
     'snk.sqlite': {
         'kind': 'sink',
@@ -934,6 +939,11 @@ COMPONENTS = {
         'kind': 'source',
         'summary': 'Mailchimp REST. Bearer API key (the key has a region suffix - the URL is https://{region}.api.mailchimp.com/3.0). Offset pagination via `offset` + `count`. responsePath /lists (or /campaigns / etc).',
         'params': ['url', 'method', 'body', 'headers', 'connectionRef', 'transportRef', 'authType', 'authToken', 'authHeader', 'tokenUrl', 'clientId', 'clientSecret', 'clientAuth', 'scope', 'responseFormat', 'responsePath', 'jsonPath', 'paginationType', 'nextUrlPath', 'cursorNextPath', 'cursorParam', 'offsetParam', 'pageSize', 'totalCountPath', 'pageParam', 'startPage', 'maxPages', 'incrementalField', 'incrementalInitial', 'responseMetadata', 'rawResponseDestination', 'httpProxy', 'httpUserAgent', 'httpConnectTimeoutSecs', 'httpReadTimeoutSecs'],
+    },
+    'src.manticore': {
+        'kind': 'source',
+        'summary': 'Read rows from a Manticore table via the HTTP JSON /search API (port 9308). Manticore answers in the Elasticsearch response shape but takes its own request: the table is named in the body as `table` (renamed from `index` in 6.0) and paging is limit/offset. A window past the default 1000 best-rank...',
+        'params': ['endpoint', 'table', 'username', 'password', 'query', 'limit', 'maxPages'],
     },
     'src.mariadb': {
         'kind': 'source',
@@ -1354,7 +1364,7 @@ COMPONENTS = {
     'xf.arr.explode': {
         'kind': 'transform',
         'summary': '',
-        'params': ['column'],
+        'params': ['column', 'recursive', 'keepParentNames'],
     },
     'xf.arr.length': {
         'kind': 'transform',
@@ -1669,7 +1679,7 @@ COMPONENTS = {
     'xf.json.flatten': {
         'kind': 'transform',
         'summary': '',
-        'params': ['column'],
+        'params': ['column', 'recursive', 'keepParentNames'],
     },
     'xf.json.merge': {
         'kind': 'transform',
