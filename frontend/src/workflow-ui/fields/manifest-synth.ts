@@ -82,7 +82,13 @@ function placeholderAutodetect(format?: string): (
 // "does not support the encoding" error rather than a fallback. So the list
 // carries the names people actually need, spelled the way DuckDB accepts them,
 // and the field stays typable for the rest. Every value below was checked
-// against DuckDB 1.5.4.
+// against DuckDB 1.5.4 - not only accepted, but read back correctly.
+//
+// BIG5 is NOT offered, and the engine refuses it: 1.5.4 accepts the name and
+// then maps the newline byte to a character, so the whole file arrives as one
+// line - zero rows, with the file's contents as column names, on a green run.
+// Accepted-but-wrong is the dangerous shape here; a wrong spelling is a hard
+// error and therefore safe.
 export const encodingField = (): Field => ({
     key: 'encoding',
     label: 'Encoding',
@@ -112,7 +118,6 @@ export const encodingField = (): Field => ({
         { label: 'Shift-JIS  Japanese', value: 'SHIFT_JIS' },
         { label: 'EUC-JP  Japanese', value: 'EUC_JP' },
         { label: 'EUC-KR  Korean', value: 'EUC_KR' },
-        { label: 'Big5  Traditional Chinese', value: 'BIG5' },
         { label: 'GB18030  Simplified Chinese', value: 'GB18030' },
         { label: 'KOI8-R  Cyrillic', value: 'KOI8_R' },
         { label: 'CP852  DOS Central European', value: 'CP852' },

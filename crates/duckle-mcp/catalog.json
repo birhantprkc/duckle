@@ -221,10 +221,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -441,10 +437,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",
@@ -881,10 +873,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",
@@ -2270,10 +2258,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -2723,10 +2707,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -2950,10 +2930,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -3127,10 +3103,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",
@@ -3438,10 +3410,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -3615,10 +3583,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",
@@ -3815,10 +3779,6 @@
                     "value": "EUC_KR"
                   },
                   {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
-                  },
-                  {
                     "label": "GB18030  Simplified Chinese",
                     "value": "GB18030"
                   },
@@ -3992,10 +3952,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",
@@ -4179,10 +4135,6 @@
                   {
                     "label": "EUC-KR  Korean",
                     "value": "EUC_KR"
-                  },
-                  {
-                    "label": "Big5  Traditional Chinese",
-                    "value": "BIG5"
                   },
                   {
                     "label": "GB18030  Simplified Chinese",

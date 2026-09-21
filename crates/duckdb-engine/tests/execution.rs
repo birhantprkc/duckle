@@ -9874,6 +9874,75 @@ fn a_published_output_leaves_no_staging_file_behind() {
     }
 }
 
+/// An encoding DuckDB accepts and reads wrongly is refused, not run.
+///
+/// A wrong SPELLING is a hard "does not support the encoding" error, which is
+/// what made the offered list trustworthy. BIG5 is the exception: 1.5.4 takes
+/// the name and maps the newline byte to a character, so the whole file arrives
+/// as ONE line. Measured on the pinned CLI over this fixture: 0 rows and 5
+/// columns, the file's own contents standing in as column names. The run was
+/// green, the node honestly said "ok (0 rows)", and an overwrite sink replaced
+/// its target with a header made of the user's dataset.
+#[test]
+fn an_encoding_that_reads_wrongly_is_refused_rather_than_run() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    // A real Big5 file: "id,nom" then three rows of U+4E2D U+6587 + a number.
+    let big5 = tmp.path().join("big5.csv");
+    std::fs::write(
+        &big5,
+        b"id,nom\n1,\xa4\xa4\xa4\xe51\n2,\xa4\xa4\xa4\xe52\n3,\xa4\xa4\xa4\xe53\n",
+    )
+    .unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node(
+                "s",
+                "src.csv",
+                json!({ "path": big5.to_string_lossy(), "hasHeader": true, "encoding": "BIG5" })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+
+    assert_eq!(
+        r.status, "error",
+        "a read that returns zero rows and the file as column names must not report ok: {:?}",
+        r
+    );
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("BIG5"), "the message has to name the encoding: {err}");
+    assert!(
+        err.contains("UTF-8"),
+        "and say what to do about it: {err}"
+    );
+    assert!(
+        !std::path::Path::new(&out).exists(),
+        "nothing should have been written over the destination"
+    );
+
+    // An encoding that works is untouched: Shift-JIS reads its own rows back.
+    let sjis = tmp.path().join("sjis.csv");
+    std::fs::write(&sjis, b"id,nom\n1,\x93\xfa\x96{\x8c\xea\n2,\x83e\x83X\x83g\n").unwrap();
+    let out2 = out_path(tmp.path(), "sjis_out.csv");
+    let r2 = engine.execute_pipeline(&doc(
+        json!([
+            node(
+                "s",
+                "src.csv",
+                json!({ "path": sjis.to_string_lossy(), "hasHeader": true, "encoding": "SHIFT_JIS" })
+            ),
+            node("k", "snk.csv", json!({ "path": out2, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    assert_eq!(r2.status, "ok", "a working encoding must still work: {:?}", r2.error);
+    assert_eq!(count(&format!("read_csv_auto('{}')", out2)), 2);
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.

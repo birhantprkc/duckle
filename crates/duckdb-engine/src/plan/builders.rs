@@ -143,6 +143,35 @@ pub(crate) fn missing_input(node: &PipelineNode, port: &str) -> EngineError {
 
 // ---- View SQL (sources + transforms) ------------------------------------
 
+/// Encodings DuckDB ACCEPTS and then reads wrongly.
+///
+/// A wrong SPELLING is a hard error - "The CSV Reader does not support the
+/// encoding: CP950" - which is why the offered list could be trusted. `BIG5` is
+/// the exception: 1.5.4 takes it and its converter maps the newline byte 0x0A to
+/// U+25D9 rather than a line break, so the reader sees ONE line. Measured on the
+/// pinned CLI over a 3-row Big5 file: 0 rows and 5 columns, the file's own
+/// contents standing in as column names. The run is green, the node honestly
+/// says "ok (0 rows)", and an overwrite sink downstream replaces its target with
+/// that. Every other offered encoding read its own content back correctly.
+///
+/// Refused here rather than only removed from the dropdown, because a pipeline
+/// saved before the removal still carries the value, and so does one written by
+/// hand or generated from the API.
+fn refuse_broken_encoding(props: &JsonValue) -> Result<(), String> {
+    let Some(enc) = string_prop(props, "encoding").filter(|s| !s.trim().is_empty()) else {
+        return Ok(());
+    };
+    if !enc.trim().eq_ignore_ascii_case("big5") {
+        return Ok(());
+    }
+    Err("encoding 'BIG5': DuckDB accepts this name and then reads the file wrongly - its \
+         converter turns the newline byte into a character, so the whole file arrives as one \
+         line and the read returns zero rows with the file's contents as column names. \
+         Convert the file to UTF-8 first (for example `iconv -f BIG5 -t UTF-8`) and leave the \
+         encoding unset."
+        .to_string())
+}
+
 pub(crate) fn build_view_sql(
     component_id: &str,
     props: &JsonValue,
@@ -192,16 +221,22 @@ pub(crate) fn build_view_sql(
         // cast back to their type, and rows that fail parsing are dropped from
         // main (they flow to the reject relation instead) rather than aborting
         // the read. With the reject port unwired the SQL is unchanged.
-        "src.csv" => Ok(if reject_wired {
-            build_csv_source_split(props, declared, false)
-        } else {
-            build_csv_source(props, declared)
-        }),
-        "src.tsv" => Ok(if reject_wired {
-            build_csv_source_split(props, declared, true)
-        } else {
-            build_tsv_source(props, declared)
-        }),
+        "src.csv" => {
+            refuse_broken_encoding(props)?;
+            Ok(if reject_wired {
+                build_csv_source_split(props, declared, false)
+            } else {
+                build_csv_source(props, declared)
+            })
+        }
+        "src.tsv" => {
+            refuse_broken_encoding(props)?;
+            Ok(if reject_wired {
+                build_csv_source_split(props, declared, true)
+            } else {
+                build_tsv_source(props, declared)
+            })
+        }
         "src.parquet" => Ok(build_parquet_source(props)),
         "src.json" | "src.jsonl" => Ok(build_json_source(props)),
         "src.sqlite" => build_sqlite_source(props),
@@ -9526,6 +9561,11 @@ pub(crate) fn build_cloud_source(
     let mut local = props.clone();
     if let Some(obj) = local.as_object_mut() {
         obj.insert("path".into(), JsonValue::String(path.clone()));
+    }
+    if matches!(chosen.as_str(), "csv" | "tsv") || !matches!(chosen.as_str(), "parquet" | "json" | "avro" | "orc") {
+        // The fallthrough below is the CSV reader, so anything that is not one
+        // of the named formats reaches it too.
+        refuse_broken_encoding(&local).map_err(EngineError::Unsupported)?;
     }
     Ok(match chosen.as_str() {
         "parquet" => build_parquet_source(&local),
