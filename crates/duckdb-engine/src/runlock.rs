@@ -205,6 +205,37 @@ pub fn lock_store(workspace: &Path, name: &str) -> Result<RunLock, String> {
 /// for every record `reconcile` looks at. Its one blind spot is a pid reused by
 /// an unrelated process, which leaves a dead run marked running until that
 /// process also exits: a delay, bounded, where the stand-in was a duplicate.
+/// The runs this process started, for as long as they are running.
+///
+/// A pid is not an identity. A container entrypoint is PID 1 every time it
+/// starts - Dockerfile.web has no init shim - so after a restart the new
+/// process finds its own pid in a receipt the previous life abandoned, and
+/// `process_alive` answers, correctly, that pid 1 is alive. Knowing which
+/// records this process actually started is what tells the two apart.
+static OURS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Remember that this process started `key`.
+pub fn claim_started(key: &str) {
+    OURS.lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string());
+}
+
+/// The work is over. A long-lived process - `serve`, the desktop - would
+/// otherwise hold every id it had ever run.
+pub fn release_started(key: &str) {
+    OURS.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+}
+
+/// Whether a record that names `pid` was left by a process that is gone, even
+/// though `pid` itself is alive: it names OUR pid, and we never started it.
+///
+/// Only ever answers a question about this process. A pid belonging to anybody
+/// else is left to the OS, so a second runner's live run is still safe.
+pub fn started_by_a_previous_life(pid: u32, key: &str) -> bool {
+    pid == std::process::id()
+        && !OURS.lock().unwrap_or_else(|e| e.into_inner()).contains(key)
+}
+
 pub fn process_alive(pid: u32) -> bool {
     pid == std::process::id() || os_process_alive(pid)
 }

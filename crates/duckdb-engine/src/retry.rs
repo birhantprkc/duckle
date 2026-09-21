@@ -294,6 +294,8 @@ pub fn begin(
     pipeline_hash: &str,
     parent_run_id: Option<String>,
 ) -> RunReceipt {
+    // A pid alone cannot say who owns this receipt, so remember that we do.
+    crate::runlock::claim_started(run_id);
     let receipt = RunReceipt {
         run_id: run_id.to_string(),
         trigger: trigger.to_string(),
@@ -378,6 +380,7 @@ pub fn finish(
     receipt.state = FINISHED.to_string();
     receipt.status = status.to_string();
     receipt.pid = None;
+    crate::runlock::release_started(&receipt.run_id);
     receipt.nodes = nodes;
     let _ = write(workspace, &receipt);
     // After the receipt is durable, so a crash between the two loses the
@@ -436,7 +439,15 @@ pub fn reconcile(workspace: &Path, live_pids: &dyn Fn(u32) -> bool) -> Vec<Strin
         if r.state != RUNNING && r.state != QUEUED {
             continue;
         }
-        if r.pid.is_some_and(|pid| live_pids(pid)) {
+        // Alive, and ours: the pid answers the first half only. A receipt
+        // naming THIS process's pid that this process never started was left by
+        // a previous life of that pid, which is every restart of a container
+        // whose entrypoint is PID 1. `process_alive` says pid 1 is alive because
+        // it is, so the run stayed `running` for ever - and prune and retention
+        // both skip `running`, so nothing could ever clear it.
+        if r.pid.is_some_and(|pid| {
+            live_pids(pid) && !crate::runlock::started_by_a_previous_life(pid, &r.run_id)
+        }) {
             continue;
         }
         r.state = INTERRUPTED.to_string();
@@ -1425,6 +1436,60 @@ mod tests {
         assert_eq!(load(tmp.path(), "run-live").unwrap().state, INTERRUPTED);
     }
 
+    /// A receipt from a PREVIOUS life of this pid is not a live run.
+    ///
+    /// A pid is not an identity, and a container entrypoint is PID 1 every time
+    /// it starts: Dockerfile.web has no init shim, so a restarted container
+    /// finds its OWN pid in the receipt the killed process left, and
+    /// `process_alive` answers - correctly - that pid 1 is alive. The run then
+    /// stays `running` for ever rather than for "a bounded delay", because the
+    /// process it is waiting on is this one. `prune` and `retention` both skip
+    /// `running`, so MAX_RECEIPTS never applied to them and the directory grew
+    /// without bound, on the one surface with no console to fix it from.
+    #[test]
+    fn a_receipt_naming_this_pid_that_this_process_never_began_is_reclaimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::create_dir_all(dir(ws)).unwrap();
+
+        // Exactly what the previous life left behind: `running`, owned by a pid
+        // that is alive because it is now OURS.
+        std::fs::write(
+            dir(ws).join("run-previous-life.json"),
+            serde_json::json!({
+                "runId": "run-previous-life",
+                "state": RUNNING,
+                "status": RUNNING,
+                "pid": std::process::id(),
+                "at": "2026-09-20T10:00:00Z",
+                "pipelineName": "orders",
+                "pipelinePath": "/pipelines/orders.json",
+                "pipelineHash": "h",
+                "engineVersion": "0.0.1",
+                "nodes": {},
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // And a run this process really is doing, with the same pid. Without
+        // this half, declaring every self-pid receipt dead would pass.
+        begin(ws, "run-mine", "manual", "orders", "/pipelines/orders.json", "h", None);
+        write(ws, &load(ws, "run-mine").unwrap()).unwrap();
+
+        let changed = reconcile(ws, &crate::runlock::process_alive);
+        assert_eq!(
+            changed,
+            vec!["run-previous-life".to_string()],
+            "a receipt this process never began, naming this process's pid, is stale"
+        );
+        assert_eq!(load(ws, "run-previous-life").unwrap().state, INTERRUPTED);
+        assert_eq!(
+            load(ws, "run-mine").unwrap().state,
+            RUNNING,
+            "this process's own run was declared dead"
+        );
+    }
     /// A receipt written before states existed finished one way or another.
     /// Reading it as `running` would let reconcile rewrite history it knows
     /// nothing about.
