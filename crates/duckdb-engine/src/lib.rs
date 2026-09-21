@@ -1616,6 +1616,21 @@ impl DuckdbEngine {
         // answer with, so it is not asked - which keeps every pipeline that does not use
         // the feature exactly as fast as it was. What a caller handed THIS job travels
         // on through `inherited_subs`, which is not this question.
+        // A row count reads no column, and a reader running with `ignoreErrors`
+        // drops a row only when the column it cannot decode is read. So a
+        // pipeline that asked to skip bad rows reported the rows it skipped as
+        // though it had written them - on every stage, because the source is a
+        // view they all inline, and on every sink except snk.parquet, which
+        // counts the file it wrote. Asked once here, where the document is.
+        let counts_need_every_column = doc.nodes.iter().any(|n| {
+            n.data
+                .properties
+                .as_ref()
+                .and_then(|p| p.get("ignoreErrors"))
+                .map(|v| v.as_bool().unwrap_or(false) || v.as_str() == Some("true"))
+                .unwrap_or(false)
+        });
+
         let sets_run_vars = compiled
             .stages
             .iter()
@@ -1740,6 +1755,7 @@ impl DuckdbEngine {
                 &redact_secrets,
                 total_start,
                 &mask::tags_from_doc(doc),
+                counts_need_every_column,
                 &mut on_event,
             );
             return r;
@@ -2760,6 +2776,7 @@ impl DuckdbEngine {
                             &db_path,
                             &stage.node_id,
                             !counted_by_sink.contains(stage.node_id.as_str()),
+                            counts_need_every_column,
                         ),
                     };
                     nodes.insert(
@@ -3085,6 +3102,9 @@ impl DuckdbEngine {
         // #301: the batched path has stages rather than the document, so the
         // column tags are handed in by the caller that does have it.
         mask_tags: &mask::TagMap,
+        // Same reason: whether any node asked for `ignoreErrors`, which decides
+        // whether a row count has to read every column to be true.
+        counts_need_every_column: bool,
         on_event: &mut dyn FnMut(PipelineEvent),
     ) -> RunResult {
         use std::io::Write;
@@ -3328,7 +3348,8 @@ impl DuckdbEngine {
             };
             match count_from {
                 Some(t) => batched_sql.push_str(&format!(
-                    "COPY (SELECT COUNT(*) AS _duckle_r FROM {}) TO '{}' (FORMAT 'json', ARRAY false);\n",
+                    "COPY (SELECT COUNT(*) AS _duckle_r{} FROM {}) TO '{}' (FORMAT 'json', ARRAY false);\n",
+                    Self::count_projection(counts_need_every_column),
                     t,
                     path_to_sql(&marker),
                 )),
@@ -3662,6 +3683,30 @@ impl DuckdbEngine {
         self.count_rows(db, from?).ok()
     }
 
+/// The projection a row count needs in order to be honest.
+///
+/// `COUNT(*)` needs no column, so DuckDB reads none - and a reader running with
+/// `ignore_errors` drops a row only when the column that cannot be decoded is
+/// actually read. The count therefore reported rows the run never saw: measured
+/// on the pinned 1.5.4 CLI over a 5-row CSV whose second row is latin-1,
+/// `SELECT count(*)` returns 5 while `SELECT *` returns 4, and the sink writes
+/// 4. Every stage downstream inherits it, because the source is a view they
+/// inline.
+///
+/// `COUNT(COLUMNS(*))` alongside it forces every column, which is what makes the
+/// row drop happen before the count. Counting rather than hashing because it is
+/// defined for every type, nested ones included.
+///
+/// Only when the pipeline asked for `ignoreErrors`: it is one aggregate per
+/// column per row, and no other pipeline should pay for it.
+fn count_projection(every_column: bool) -> &'static str {
+    if every_column {
+        ", COUNT(COLUMNS(*))"
+    } else {
+        ""
+    }
+}
+
     fn count_rows(&self, db: &Path, name: &str) -> Result<u64, EngineError> {
         self.count_from_expr(db, &plan::quote_ident(name))
     }
@@ -3696,6 +3741,7 @@ impl DuckdbEngine {
         db: &Path,
         name: &str,
         want_count: bool,
+        every_column: bool,
     ) -> (Option<u64>, Option<NodePreview>) {
         if !want_count && !self.previews {
             return (None, None);
@@ -3705,7 +3751,11 @@ impl DuckdbEngine {
         // fetch columns and rows that are then discarded. Ask for the count alone.
         let mut sql = String::new();
         if want_count {
-            sql.push_str(&format!("SELECT COUNT(*) AS n FROM {q};", q = q));
+            sql.push_str(&format!(
+                "SELECT COUNT(*) AS n{} FROM {q};",
+                Self::count_projection(every_column),
+                q = q
+            ));
         }
         if self.previews {
             sql.push_str(&format!(

@@ -9615,6 +9615,70 @@ fn a_nodes_memory_limit_applies_to_that_node() {
     );
 }
 
+/// A run reports the rows it kept, not the rows it skipped.
+///
+/// `ignoreErrors` is the "skip rows that won't parse" toggle, and DuckDB drops
+/// such a row only when the column it cannot decode is actually read. A row
+/// count reads no column, so the count returned the rows in the FILE while the
+/// sink wrote the rows that decoded: a scheduled load lost the non-ASCII rows
+/// and the run summary, the receipt and any row-count assertion all agreed
+/// nothing had been lost. Every stage inherits it, because the source is a view
+/// they inline, and every sink except snk.parquet, which counts what it wrote.
+///
+/// Run on BOTH execution paths - the batched marker and the per-stage count are
+/// built in different places. `ctl.wait` is what forces the per-stage one:
+/// `memoryLimitMb` would do it too, but it now MATERIALIZES the stage, and a
+/// table's rows are already decoded, so the test would pass without the fix.
+#[test]
+fn a_run_reports_the_rows_it_kept_not_the_rows_it_skipped() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    // Row 2 is latin-1, which is not valid UTF-8: five rows in, four readable.
+    let csv = tmp.path().join("mixed.csv");
+    std::fs::write(&csv, b"id,nom\n1,alice\n2,caf\xe9\n3,bob\n4,dave\n5,erin\n").unwrap();
+    let src = serde_json::json!({
+        "path": csv.to_string_lossy(), "hasHeader": true, "ignoreErrors": true
+    });
+
+    for per_stage in [false, true] {
+        let out = out_path(tmp.path(), "kept.csv");
+        let d = if per_stage {
+            doc(
+                json!([
+                    node("s", "src.csv", src.clone()),
+                    node("w", "ctl.wait", json!({ "duration": 1, "unit": "milliseconds" })),
+                    node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+                ]),
+                json!([main_edge("e1", "s", "w"), main_edge("e2", "w", "k")]),
+            )
+        } else {
+            doc(
+                json!([
+                    node("s", "src.csv", src.clone()),
+                    node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+                ]),
+                json!([main_edge("e1", "s", "k")]),
+            )
+        };
+        let r = engine.execute_pipeline(&d);
+        assert_eq!(r.status, "ok", "run failed: {:?}", r.error);
+
+        assert_eq!(
+            count(&format!("read_csv_auto('{}')", out)),
+            4,
+            "the sink writes what decoded"
+        );
+        for node_id in ["s", "k"] {
+            assert_eq!(
+                r.nodes.get(node_id).and_then(|n| n.rows),
+                Some(4),
+                "{node_id} reports a figure the run did not write (per_stage {per_stage}): {:?}",
+                r.nodes.get(node_id)
+            );
+        }
+    }
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.
