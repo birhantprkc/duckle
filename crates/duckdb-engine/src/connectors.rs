@@ -14817,32 +14817,6 @@ impl DuckdbEngine {
         db: &Path,
         spec: &MongoSinkSpec,
     ) -> Result<String, EngineError> {
-        // Replace drops the collection, and a drop takes every index on it as
-        // well, so it is not done on an empty upstream. The rule is the one
-        // `run_oracle_sink` states and every clearing sink follows: a run that
-        // produced nothing leaves the target alone rather than emptying it on
-        // the strength of an upstream that may simply have failed to produce -
-        // a late file, a filter that matched nothing, an empty API page. This
-        // one dropped first and counted afterwards, and reported
-        // "inserted 0 docs" over a collection that was no longer there.
-        //
-        // LIMIT 1 rather than a count: the question is only whether any row
-        // exists. Asked before the staging COPY, so an empty run does no work
-        // at all.
-        if spec.mode == "replace" {
-            let probe = format!(
-                "SELECT 1 FROM {} LIMIT 1",
-                plan::quote_ident(&spec.from_view)
-            );
-            let rows = self.run_rows(Some(db), &probe)?;
-            if rows.is_empty() {
-                return Ok(format!(
-                    "mongodb: 0 rows upstream, left {}.{} as it was",
-                    spec.database, spec.collection
-                ));
-            }
-        }
-
         // Stream the upstream through newline-delimited JSON on disk instead of
         // materializing it. run_rows held the whole result set in memory and, on
         // a million rows, spent 7 s building it before a single document was
@@ -14865,6 +14839,27 @@ impl DuckdbEngine {
             sql_escape(&ndjson.display().to_string().replace('\\', "/"))
         );
         self.run(Some(db), &copy, false)?;
+
+        // Replace drops the collection, and a drop takes every index on it as
+        // well, so it is not done on an empty upstream. The rule is the one
+        // `run_oracle_sink` states and every clearing sink follows: a run that
+        // produced nothing leaves the target alone rather than emptying it on
+        // the strength of an upstream that may simply have failed to produce -
+        // a late file, a filter that matched nothing, an empty API page.
+        //
+        // Asked of the STAGED rows, after the COPY, not of a `SELECT 1` before
+        // it. A constant projection cannot fail the way the real read can, so
+        // the guard would say "there are rows" about a read that then produced
+        // none - which is how the Oracle sink came to empty a table and write
+        // nothing back. The staged file is exactly what the insert loop reads:
+        // the COPY writes one line per row, so no bytes means no rows.
+        let no_rows = std::fs::metadata(&ndjson).map(|m| m.len() == 0).unwrap_or(false);
+        if no_rows {
+            return Ok(format!(
+                "mongodb: 0 rows upstream, left {}.{} as it was",
+                spec.database, spec.collection
+            ));
+        }
 
         let cancel = self.cancel.clone();
         // Multi-threaded on purpose. serde_json -> BSON is CPU work, and on a
@@ -14902,15 +14897,14 @@ impl DuckdbEngine {
                 for chunk in mongo_ndjson_batches(&ndjson, spec.batch_size)
                     .map_err(|e| format!("reading staged rows: {}", e))?
                 {
+                    let chunk = chunk?;
                     let chunk = &chunk;
                     if cancel.load(Ordering::Relaxed) {
                         return Err("cancelled".into());
                     }
                     for v in chunk {
-                        let mut doc = match mongodb::bson::to_document(v) {
-                            Ok(d) => d,
-                            Err(_) => continue,
-                        };
+                        let mut doc = mongodb::bson::to_document(v)
+                            .map_err(|e| format!("row cannot be stored as a document: {}", e))?;
                         let mut filter = mongodb::bson::Document::new();
                         for k in &spec.upsert_keys {
                             if let Some(val) = doc.get(k) {
@@ -14960,6 +14954,7 @@ impl DuckdbEngine {
             for chunk in mongo_ndjson_batches(&ndjson, spec.batch_size)
                 .map_err(|e| format!("reading staged rows: {}", e))?
             {
+                let chunk = chunk?;
                 if cancel.load(Ordering::Relaxed) {
                     return Err("cancelled".into());
                 }
@@ -14969,10 +14964,16 @@ impl DuckdbEngine {
                 }
                 let coll = collection.clone();
                 pending.push(tokio::spawn(async move {
+                    // A row that cannot become a document used to be dropped
+                    // here as well, so the count and the collection disagreed
+                    // with the upstream and nothing said so.
                     let docs: Vec<mongodb::bson::Document> = chunk
                         .iter()
-                        .filter_map(|v| mongodb::bson::to_document(v).ok())
-                        .collect();
+                        .map(|v| {
+                            mongodb::bson::to_document(v)
+                                .map_err(|e| format!("row cannot be stored as a document: {}", e))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
                     if docs.is_empty() {
                         return Ok(0);
                     }
@@ -21063,15 +21064,24 @@ static HF_SINK_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 /// same memory as a thousand-row one. A line that will not parse is skipped
 /// rather than failing the whole load, matching how the previous in-memory
 /// path treated an unconvertible row.
+/// The staged rows, in batches, or the reason a row could not be read.
+///
+/// A line that does not parse used to be skipped in silence - no counter, no
+/// warning - so the sink reported "inserted N docs" with N quietly smaller than
+/// the upstream, over a collection it had just dropped. DuckDB writes a
+/// non-finite number as a bare `NaN` token, which no JSON reader accepts, so a
+/// single such value in a DOUBLE column silently removed its row; an I/O error
+/// part way through the file did the same to every row after it.
 fn mongo_ndjson_batches(
     path: &Path,
     batch_size: usize,
-) -> std::io::Result<impl Iterator<Item = Vec<JsonValue>>> {
+) -> std::io::Result<impl Iterator<Item = Result<Vec<JsonValue>, String>>> {
     use std::io::BufRead;
     let file = std::fs::File::open(path)?;
     let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
     let size = batch_size.max(1);
     let mut done = false;
+    let mut row = 0_usize;
     Ok(std::iter::from_fn(move || {
         if done {
             return None;
@@ -21086,24 +21096,33 @@ fn mongo_ndjson_batches(
                     break;
                 }
                 Ok(_) => {
+                    row += 1;
                     let t = line.trim();
                     if t.is_empty() {
                         continue;
                     }
-                    if let Ok(v) = serde_json::from_str::<JsonValue>(t) {
-                        batch.push(v);
+                    match serde_json::from_str::<JsonValue>(t) {
+                        Ok(v) => batch.push(v),
+                        Err(e) => {
+                            done = true;
+                            return Some(Err(format!(
+                                "staged row {}: {}",
+                                row,
+                                crate::json_bridge_failure(&e.to_string(), t)
+                            )));
+                        }
                     }
                 }
-                Err(_) => {
+                Err(e) => {
                     done = true;
-                    break;
+                    return Some(Err(format!("reading staged row {}: {}", row + 1, e)));
                 }
             }
         }
         if batch.is_empty() {
             None
         } else {
-            Some(batch)
+            Some(Ok(batch))
         }
     }))
 }
@@ -23850,6 +23869,62 @@ mod source_path_of_tests {
         // Only a single-letter prefix is a drive. A key that legitimately
         // contains a colon keeps it.
         assert_eq!(source_path_of("s3://bucket/odd:name/f.txt"), "odd:name/f.txt");
+    }
+}
+
+#[cfg(test)]
+mod mongo_staging_tests {
+    use super::*;
+
+    /// A staged row that cannot be read fails the write instead of vanishing.
+    ///
+    /// The reader skipped such a line in silence - no counter, no warning - so
+    /// the sink reported "inserted N docs" with N quietly smaller than the
+    /// upstream, over a collection it had just dropped in replace mode. DuckDB
+    /// writes a non-finite number as the bare token `NaN`, which no JSON reader
+    /// accepts, so one such value in a DOUBLE column removed its row: exactly
+    /// the shape of `COPY (SELECT * FROM v) TO 'rows.ndjson' (FORMAT JSON)`
+    /// over a column holding one.
+    #[test]
+    fn a_staged_row_that_cannot_be_read_fails_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.ndjson");
+        std::fs::write(
+            &path,
+            "{\"id\":1,\"v\":1.5}\n{\"id\":2,\"v\":NaN}\n{\"id\":3,\"v\":2.5}\n",
+        )
+        .unwrap();
+
+        let mut it = super::mongo_ndjson_batches(&path, 1).expect("the file opens");
+        let first = it.next().expect("a first batch").expect("the first row reads");
+        assert_eq!(first.len(), 1);
+        let err = it
+            .next()
+            .expect("the bad row is reported rather than skipped")
+            .expect_err("it must be an error");
+        assert!(err.contains("staged row 2"), "and say which row: {err}");
+        assert!(
+            err.contains("non-finite"),
+            "and name the cause, since DuckDB wrote it: {err}"
+        );
+    }
+
+    #[test]
+    fn a_file_of_good_rows_still_batches_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rows.ndjson");
+        std::fs::write(&path, "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n").unwrap();
+        let batches: Vec<_> = super::mongo_ndjson_batches(&path, 2)
+            .unwrap()
+            .map(|b| b.expect("all rows read").len())
+            .collect();
+        assert_eq!(batches, vec![2, 1]);
+
+        // And an empty staging file yields nothing at all, which is what the
+        // caller reads as "no rows upstream".
+        let empty = dir.path().join("empty.ndjson");
+        std::fs::write(&empty, "").unwrap();
+        assert_eq!(super::mongo_ndjson_batches(&empty, 2).unwrap().count(), 0);
     }
 }
 
