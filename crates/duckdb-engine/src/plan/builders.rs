@@ -9534,8 +9534,31 @@ pub(crate) fn build_cloud_source(
         })
         .unwrap_or_default();
     let override_fmt = string_prop(props, "format");
+    // `format` is read TWICE on this node, for two different questions: here as
+    // the container (parquet / json / tsv / csv), and again inside
+    // `build_json_source` as the JSON SHAPE (array / jsonl / object). So a shape
+    // value - which is the spelling src.json uses, and the only thing that reads
+    // a BOM'd array correctly - matched no container arm and fell through to the
+    // CSV reader: the JSON body was parsed as CSV, and the sink got comma-split
+    // fragments of the document as COLUMN NAMES with zero rows, on a green run.
+    //
+    // A shape therefore selects the JSON container, and the prop is left in
+    // place so the JSON builder still reads it as the shape. Both questions get
+    // the same answer instead of disagreeing.
+    let shape_means_json = matches!(
+        override_fmt
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "array" | "jsonl" | "ndjson" | "newline_delimited" | "object" | "unstructured"
+    );
     let lower = path.to_ascii_lowercase();
-    let chosen = override_fmt.filter(|s| !s.is_empty()).unwrap_or_else(|| {
+    let chosen = if shape_means_json {
+        "json".to_string()
+    } else {
+        override_fmt.filter(|s| !s.is_empty()).unwrap_or_else(|| {
         if lower.ends_with(".parquet") || lower.ends_with(".pq") {
             "parquet".into()
         } else if lower.ends_with(".json")
@@ -9548,7 +9571,21 @@ pub(crate) fn build_cloud_source(
         } else {
             "csv".into()
         }
-    });
+        })
+    };
+    // A value that is neither a container nor a shape is refused rather than
+    // read as CSV. Falling through meant any typo - or any format this source
+    // does not implement - parsed the body with the CSV reader and reported ok.
+    if !matches!(
+        chosen.trim().to_ascii_lowercase().as_str(),
+        "csv" | "tsv" | "json" | "parquet" | "avro" | "orc"
+    ) {
+        return Err(EngineError::Unsupported(format!(
+            "Cloud source format '{}' is not recognised. Use parquet, json, csv or tsv for the \
+             container, or a JSON shape (array, jsonl, object) which selects JSON.",
+            chosen
+        )));
+    }
     // Delegate to the LOCAL format builders with the resolved cloud path
     // injected into a cloned props, so a cloud (s3/gcs/azure/http) source
     // gets the same treatment as its local counterpart: parquet column

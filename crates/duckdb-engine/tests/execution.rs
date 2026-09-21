@@ -9943,6 +9943,106 @@ fn an_encoding_that_reads_wrongly_is_refused_rather_than_run() {
     assert_eq!(count(&format!("read_csv_auto('{}')", out2)), 2);
 }
 
+/// A JSON shape on an HTTP source means JSON, not CSV.
+///
+/// `format` was read twice on these nodes, for two different questions: once as
+/// the container (parquet / json / tsv / csv) and again inside the JSON builder
+/// as the SHAPE (array / jsonl / object). A shape value - the spelling src.json
+/// uses, and the only thing that reads a BOM'd array correctly - matched no
+/// container arm and fell through to the CSV reader. The JSON body was parsed as
+/// CSV: the run was green and the sink got comma-split fragments of the document
+/// as COLUMN NAMES with zero rows. Anyone copying the src.json spelling across
+/// to an HTTP node hit it and was told nothing.
+///
+/// DuckDB's httpfs does the fetching here, not Duckle, and it asks more than
+/// once - a HEAD for the size, then a GET - so the mock serves several
+/// connections and answers each by method.
+#[test]
+fn a_json_shape_on_an_http_source_means_json_not_csv() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let engine = engine_or_skip!();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock http");
+    let port = listener.local_addr().unwrap().port();
+    let body = r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#.to_string();
+    let handle = std::thread::spawn(move || {
+        for stream in listener.incoming().take(8) {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            stream.set_read_timeout(Some(Duration::from_millis(250))).ok();
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            let req = String::from_utf8_lossy(&chunk[..n]).to_string();
+            let head_only = req.starts_with("HEAD");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Accept-Ranges: bytes\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                if head_only { "" } else { body.as_str() }
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+    let url = format!("http://127.0.0.1:{}/rows.json", port);
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            // "array" is the JSON SHAPE, which used to route the body into the
+            // CSV reader.
+            node("s", "src.http", json!({ "url": url, "format": "array" })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    drop(handle);
+    assert_eq!(r.status, "ok", "run failed: {:?}", r.error);
+
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        written.starts_with("id,name"),
+        "the document's own columns have to arrive, not fragments of its text: {written:?}"
+    );
+    assert_eq!(
+        count(&format!("read_csv_auto('{}')", out)),
+        2,
+        "both rows: {written:?}"
+    );
+}
+
+/// A format that is neither a container nor a JSON shape is refused.
+///
+/// The container match ended in `_ => build_csv_source(..)`, so any typo - or
+/// any format this source does not implement - parsed the body with the CSV
+/// reader and reported ok.
+#[test]
+fn an_unrecognised_cloud_format_is_refused_rather_than_read_as_csv() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node(
+                "s",
+                "src.http",
+                json!({ "url": "http://127.0.0.1:1/rows", "format": "parquett" })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    assert_eq!(r.status, "error", "a typo must not be read as CSV: {:?}", r);
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("parquett"), "and name the value: {err}");
+}
+
 #[test]
 fn xml_roundtrip_via_snk_then_src() {
     // CSV -> snk.xml -> file -> src.xml -> CSV. Preserve 3 rows.
