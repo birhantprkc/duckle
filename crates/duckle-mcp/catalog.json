@@ -27910,15 +27910,16 @@
               },
               {
                 "key": "chunkSize",
-                "label": "Chunk size (tokens)",
+                "label": "Chunk size (characters)",
                 "kind": "integer",
-                "defaultValue": 512
+                "defaultValue": 1000,
+                "description": "Characters, not tokens - the splitter is a plain character window. English runs about 4 characters per token, so 1000 characters is roughly 250 tokens."
               },
               {
                 "key": "chunkOverlap",
-                "label": "Overlap (tokens)",
+                "label": "Overlap (characters)",
                 "kind": "integer",
-                "defaultValue": 64
+                "defaultValue": 100
               },
               {
                 "key": "outputColumn",

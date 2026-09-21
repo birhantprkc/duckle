@@ -79,6 +79,51 @@ pub fn full() -> &'static Value {
 
 #[cfg(test)]
 mod tests {
+
+    /// xf.ai.chunk slices characters, and says so.
+    ///
+    /// `run_ai_chunk` passes chunkSize straight into `chunk_text`, which windows
+    /// `text.chars()`: no tokenizer is involved anywhere in the workspace. The
+    /// form said "(tokens)", so someone asking for 512 got about a quarter of
+    /// the text they meant, and this catalog taught the same wrong unit to
+    /// anything authoring a pipeline through the MCP server.
+    ///
+    /// The defaults belong here too. A form `defaultValue` is only a display
+    /// fallback and is never written into the node, so an untouched node runs
+    /// the engine's own fallback and the form has to show THAT number.
+    #[test]
+    fn ai_chunk_sizes_are_labelled_in_the_unit_the_engine_slices() {
+        let schema = super::schema("xf.ai.chunk").expect("xf.ai.chunk missing from the catalog");
+        let sections = schema["manifest"]["sections"]
+            .as_array()
+            .expect("xf.ai.chunk declares no sections")
+            .clone();
+        let fields: Vec<&serde_json::Value> = sections
+            .iter()
+            .flat_map(|s| s["fields"].as_array().expect("a section declares no fields"))
+            .collect();
+        // The engine's own fallbacks, plan/mod.rs: chunkSize 1000, overlap 100.
+        for (key, engine_fallback) in [("chunkSize", 1000u64), ("chunkOverlap", 100u64)] {
+            let f = fields
+                .iter()
+                .find(|f| f["key"].as_str() == Some(key))
+                .unwrap_or_else(|| panic!("xf.ai.chunk declares no {key}"));
+            let label = f["label"].as_str().unwrap_or_default();
+            assert!(
+                !label.contains("token"),
+                "{key} is labelled {label:?}, but the splitter windows chars"
+            );
+            assert!(
+                label.contains("character"),
+                "{key} must name its unit, got {label:?}"
+            );
+            assert_eq!(
+                f["defaultValue"].as_u64(),
+                Some(engine_fallback),
+                "{key}'s displayed default is not what an untouched node runs"
+            );
+        }
+    }
     /// Components whose engine builder requires a second input, and so must
     /// declare a `lookup` port for the canvas to let anyone wire one up.
     ///

@@ -8798,10 +8798,21 @@ function synthAiTransform(comp: ComponentDef): ComponentManifest {
                     // A `strategy` select (sentence / recursive / semantic) was here.
                     // AiChunkSpec has no strategy member and the arm never looks for
                     // one - the splitter is fixed-size only.
-                    { key: 'chunkSize', label: 'Chunk size (tokens)', kind: 'integer', defaultValue: 512 },
+                    // Characters, not tokens: `chunk_text` windows `text.chars()`
+                    // and nothing in the workspace tokenizes. The defaults are the
+                    // ENGINE's own fallbacks, because a defaultValue is only shown
+                    // and never written into the node, so an untouched node ran
+                    // 1000/100 while the form displayed 512/64.
+                    {
+                        key: 'chunkSize',
+                        label: 'Chunk size (characters)',
+                        kind: 'integer',
+                        defaultValue: 1000,
+                        description: 'Characters, not tokens - the splitter is a plain character window. English runs about 4 characters per token, so 1000 characters is roughly 250 tokens.',
+                    },
                     // The engine reads `chunkOverlap`, which is also the name used
                     // everywhere else; `overlap` reached nothing.
-                    { key: 'chunkOverlap', label: 'Overlap (tokens)', kind: 'integer', defaultValue: 64 },
+                    { key: 'chunkOverlap', label: 'Overlap (characters)', kind: 'integer', defaultValue: 100 },
                     { key: 'outputColumn', label: 'Output column', kind: 'text', defaultValue: 'chunk' },
                     // The arm reads `mode` and it decides the SHAPE of the
                     // output, which every downstream node has to match. With
