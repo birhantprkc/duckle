@@ -7368,6 +7368,30 @@ impl DuckdbEngine {
             None => 0,
         };
         if consumed == 0 {
+            // Two different situations end up here, and only one of them is
+            // worth waiting for.
+            //
+            // If the read was CAPPED - it stopped at max_bytes rather than at
+            // the end of the file - then the record is already complete on disk
+            // and the cap is what cut it. Nothing will ever arrive that helps:
+            // every later run reads the same first max_bytes, finds no newline,
+            // reports "waiting for the rest" and leaves the offset where it was.
+            // Measured: a 1,030-byte NDJSON of five 206-byte records with
+            // maxBytes 100 gave four consecutive green runs, "0 rows" each, the
+            // sink rewritten with a header and nothing else, and no message
+            // anywhere naming the cap.
+            //
+            // If the read reached the end of the file, the last line genuinely
+            // has no newline yet and the writer is mid-record, which is what
+            // this path is for.
+            if take == spec.max_bytes && start + take < len {
+                return Err(EngineError::Query(format!(
+                    "spool: the next record in {} is longer than maxBytes ({} bytes), so no \
+                     whole line can ever be read and the position will never advance. Raise \
+                     maxBytes above the size of one record.",
+                    spec.path, spec.max_bytes
+                )));
+            }
             self.spool_empty_relation(db, &spec.node_id, path)?;
             return Ok(format!(
                 "spool: {} has a partial record and no complete one; waiting for the rest",

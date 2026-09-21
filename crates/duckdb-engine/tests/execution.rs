@@ -18452,6 +18452,78 @@ fn a_failed_batch_does_not_advance_the_source_position() {
 /// run stopped. It is the reading half of push-source support: a listener
 /// keeps the port up and appends here, so a batch boundary costs nothing.
 ///
+/// A cap smaller than one record says so, instead of waiting for ever.
+///
+/// `maxBytes` bounds one pass. When it cuts the first record, the pass finds no
+/// newline and reports "waiting for the rest" - but the record is already whole
+/// on disk and the cap is what cut it, so nothing will ever arrive that helps.
+/// Every later run reads the same first `maxBytes`, says the same thing and
+/// leaves the position where it was: measured as four consecutive green runs,
+/// zero rows each, the sink rewritten with a header and nothing else, and no
+/// message anywhere naming the cap.
+///
+/// A half-written last line still waits, which is what that path is for.
+#[test]
+fn a_spool_cap_below_one_record_says_so_rather_than_waiting_for_ever() {
+    let engine = engine_or_skip!();
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("DUCKLE_WORKSPACE", tmp.path());
+    let spool = tmp.path().join("hooks.ndjson");
+    let out = out_path(tmp.path(), "out.csv");
+    // Three complete records, each far longer than the cap below.
+    let mut body = String::new();
+    for i in 1..=3 {
+        body.push_str(&format!("{{\"id\":{i},\"payload\":\"{}\"}}\n", "x".repeat(200)));
+    }
+    std::fs::write(&spool, &body).unwrap();
+
+    let capped = doc(
+        json!([
+            node(
+                "s",
+                "src.spool",
+                json!({
+                    "path": spool.to_string_lossy().replace('\\', "/"),
+                    "maxBytes": 100,
+                    "trackOffset": true
+                })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    );
+    let r = engine.execute_pipeline_named(&capped, "spoolcap");
+    assert_eq!(
+        r.status, "error",
+        "a cap that can never yield a whole line must say so, not report ok with no rows: {:?}",
+        r
+    );
+    let err = r.error.clone().unwrap_or_default();
+    assert!(err.contains("maxBytes"), "and name the cap: {err}");
+
+    // A cap that fits reads the records, so the refusal is about the cap and
+    // not about spooling.
+    let roomy = doc(
+        json!([
+            node(
+                "s",
+                "src.spool",
+                json!({
+                    "path": spool.to_string_lossy().replace('\\', "/"),
+                    "maxBytes": 65536,
+                    "trackOffset": true
+                })
+            ),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    );
+    let r2 = engine.execute_pipeline_named(&roomy, "spoolroomy");
+    assert_eq!(r2.status, "ok", "a cap above one record still reads: {:?}", r2.error);
+    assert_eq!(count(&format!("read_csv_auto('{}')", out)), 3);
+}
+
 /// These cover the three ways a tailer goes wrong: re-reading what it already
 /// delivered, consuming a half-written record, and losing its place when the
 /// file is rotated.
