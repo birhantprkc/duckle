@@ -525,6 +525,22 @@ fn run_with(args: Args) -> Result<bool, String> {
         true => DuckdbEngine::new(duckdb),
         false => DuckdbEngine::new(duckdb).without_previews(),
     };
+    // Clear what an earlier run left behind, before adding to it.
+    //
+    // The documented headless deployment is cron calling `--pipeline`, and this
+    // path was the one surface that never reconciled: `retry`, `serve`, `web`,
+    // the desktop and the backfill paths all do. So on a box where CI cancels
+    // jobs or the machine reboots, every killed run left a receipt claiming to
+    // be in flight and no later run of any pipeline cleared it - measured by
+    // running `--pipeline` to completion after a kill and re-reading the
+    // receipt: still `running`, still naming a pid that no longer existed.
+    //
+    // It compounds: `prune` and `retention` both exclude running receipts from
+    // their candidates, so the MAX_RECEIPTS cap never applied to them, the
+    // directory grew without bound, and `prune` re-scans all of it on every
+    // receipt write. This is also the surface with no console to fix it from.
+    duckle_duckdb_engine::recovery::reclaim_abandoned(&workspace);
+
     // #259: identity before work. A run killed here still exists to be found,
     // and `reconcile` can later tell it apart from one that finished.
     let trigger = if args.retry_of.is_some() { "retry" } else { "manual" };

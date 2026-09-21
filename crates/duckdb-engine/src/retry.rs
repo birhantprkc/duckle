@@ -450,6 +450,40 @@ pub fn reconcile(workspace: &Path, live_pids: &dyn Fn(u32) -> bool) -> Vec<Strin
             // place `interrupted` is ever produced; without it here the ABORT
             // mapping is unreachable from anywhere but a unit test.
             export_lineage(workspace, &r, crate::openlineage::EventType::Abort);
+            // And into the run history, which is where monitoring reads.
+            //
+            // `append_run_record` is only called when a run FINISHES, so an
+            // interrupted one left no record at all - and `render_metrics` /
+            // `write_metrics_textfile` are rendered from that history. The
+            // textfile therefore still carried the PREVIOUS successful run:
+            // measured on a workspace whose last run was killed,
+            // `duckle_run_last_status 1` and `duckle_run_last_rows 8000000`
+            // from the run before it. An operator alerting on
+            // `duckle_run_last_status == 0` is never paged, and a pipeline whose
+            // only runs were interrupted emits no series at all, so even an
+            // alert on "status != 1" has nothing to match.
+            //
+            // Best-effort, like the lineage export above it: a run that cannot
+            // record itself is still a run that was interrupted, and failing
+            // here would leave the receipt reconciled but the loop stopped.
+            let record = crate::history::RunRecord {
+                run_id: Some(r.run_id.clone()),
+                at: r.at.clone(),
+                status: INTERRUPTED.to_string(),
+                duration_ms: 0,
+                rows: 0,
+                node_count: 0,
+                trigger: r.trigger.clone(),
+                error: None,
+                unchanged: false,
+                incomplete: false,
+                incomplete_reason: None,
+                category: None,
+                assets: Vec::new(),
+                nodes: Vec::new(),
+            };
+            let _ = crate::history::append_run_record(workspace, &r.pipeline_name, record);
+            let _ = crate::history::write_metrics_textfile(workspace);
             changed.push(r.run_id.clone());
         }
     }
@@ -1077,6 +1111,74 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    /// An interrupted run reaches the run history and the metrics.
+    ///
+    /// `append_run_record` is only called when a run FINISHES, so an interrupted
+    /// one left no record - and the metrics are rendered from that history. The
+    /// textfile therefore kept reporting the PREVIOUS successful run: measured
+    /// on a workspace whose last run was killed, `duckle_run_last_status 1` and
+    /// `duckle_run_last_rows 8000000` from the run before it. An operator
+    /// alerting on `duckle_run_last_status == 0` is never paged, and a pipeline
+    /// whose only runs were interrupted emits no series at all.
+    #[test]
+    fn an_interrupted_run_reaches_the_history_and_the_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_path_buf();
+
+        // A run that finished successfully, which is what monitoring last saw.
+        crate::history::append_run_record(
+            &ws,
+            "orders",
+            crate::history::RunRecord {
+                run_id: Some("run-ok".into()),
+                at: "2026-09-20T10:00:00Z".into(),
+                status: "ok".into(),
+                duration_ms: 1200,
+                rows: 8_000_000,
+                node_count: 3,
+                trigger: "scheduled".into(),
+                error: None,
+                unchanged: false,
+                incomplete: false,
+                incomplete_reason: None,
+                category: None,
+                assets: Vec::new(),
+                nodes: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        // And then one that was killed: still `running`, owned by a pid that is
+        // never alive on either platform.
+        let mut killed = begin(&ws, "run-killed", "scheduled", "orders", "pipelines/orders.json", "h", None);
+        killed.pid = Some(u32::MAX);
+        write(&ws, &killed).unwrap();
+
+        let changed = reconcile(&ws, &|_pid| false);
+        assert_eq!(changed, vec!["run-killed".to_string()]);
+
+        let history = crate::history::load_run_history(&ws, "orders");
+        let last = history.last().expect("the interrupted run is recorded");
+        assert_eq!(
+            last.status, INTERRUPTED,
+            "the newest record must be the interrupted run, not the success before it: {history:?}"
+        );
+        assert_eq!(last.run_id.as_deref(), Some("run-killed"));
+
+        // And the rendered metrics stop claiming the last run succeeded.
+        crate::history::write_metrics_textfile(&ws).unwrap();
+        let rendered = crate::history::render_metrics(&ws).expect("metrics render");
+        let status_line = rendered
+            .lines()
+            .find(|l| l.starts_with("duckle_run_last_status") && l.contains("orders"))
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !status_line.trim_end().ends_with(" 1"),
+            "the gauge still reports the previous success: {status_line}"
+        );
     }
 
     /// Prune deletes only what it has read and found finished.
