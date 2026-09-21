@@ -11959,6 +11959,83 @@ fn src_webhook_collects_inbound_http_requests() {
     assert_eq!(ev2, "login");
 }
 
+/// maxRequests counts REQUESTS, not the rows they unfold into.
+///
+/// The loop was bounded by `rows.len()`, and one POST whose body is a JSON array
+/// of k objects pushes k rows, so a listener asked for N requests closed after
+/// ceil(N/k) of them and every later sender hit a closed port. The default of 1
+/// hid it: any k >= 1 exits after the first request either way.
+#[test]
+fn src_webhook_max_requests_counts_requests_not_rows() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let engine = engine_or_skip!();
+    let port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    // Two POSTs, each an ARRAY of two objects: 2 requests, 4 rows.
+    let client = std::thread::spawn(move || {
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        for (i, body) in [r#"[{"id":1},{"id":2}]"#, r#"[{"id":3},{"id":4}]"#].into_iter().enumerate() {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            // The first POST waits for the engine to bind; by the second the
+            // listener is already up, so that window is short and every attempt
+            // is bounded. An unanswered localhost SYN costs ~21s under the OS
+            // default, which made one regression a 7-minute test run.
+            let tries = if i == 0 { 200 } else { 20 };
+            for _ in 0..tries {
+                if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+                    let req = format!(
+                        "POST /hook HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = s.write_all(req.as_bytes());
+                    let _ = s.flush();
+                    let mut resp = Vec::new();
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(1000)));
+                    let _ = s.read_to_end(&mut resp);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let out = out_path(tmp.path(), "out.csv");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("w", "src.webhook", json!({
+                "port": port,
+                "maxRequests": 2,
+                // The fixed loop genuinely waits for the second request, so the
+                // deadline has to outlast a loaded runner.
+                "timeoutMs": 15000,
+            })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e", "w", "k")]),
+    ));
+    let _ = client.join();
+    assert_eq!(r.status, "ok", "src.webhook failed: {:?}", r.error);
+    let n = count(&format!("read_csv_auto('{}')", out));
+    assert_eq!(n, 4, "two array POSTs of two objects are 2 requests and 4 rows, got {} row(s)", n);
+    // The id set is what makes the failure unambiguous: a lost first POST would
+    // also give two rows, but they would be 3,4. Seeing 1,2 is the early close.
+    let ids = scalar_string(&format!(
+        "SELECT string_agg(CAST(id AS VARCHAR), ',' ORDER BY id) FROM read_csv_auto('{}')",
+        out
+    ));
+    assert_eq!(ids, "1,2,3,4", "the listener closed before the second request");
+}
+
 /// A webhook sender is told the truth about the RUN, not just about the node.
 ///
 /// src.webhook answered 200 as soon as its rows were in the run's database, and

@@ -11691,7 +11691,12 @@ impl DuckdbEngine {
         // durably written (persist-then-ack), so a materialize failure can't
         // leave senders thinking a never-stored event was delivered.
         let mut pending: Vec<std::net::TcpStream> = Vec::new();
-        while (rows.len() as u64) < spec.max_requests {
+        // Requests, not rows. One array body is ONE request however many rows it
+        // unfolds into, so bounding this on `rows` closed the listener after
+        // ceil(max_requests / rows_per_body) of them and left every later sender
+        // hitting a closed port.
+        let mut accepted: u64 = 0;
+        while accepted < spec.max_requests {
             self.check_cancelled()?;
             if Instant::now() >= deadline {
                 break;
@@ -11771,6 +11776,9 @@ impl DuckdbEngine {
                     rows.push(JsonValue::Object(row));
                 }
             }
+            // Counted here, at the end: a malformed body and a path-filter 404
+            // both `continue` above, and specs.rs promises they do not count.
+            accepted += 1;
             // Hold the connection open; answer it after the batch is persisted.
             pending.push(stream);
         }
@@ -11782,8 +11790,8 @@ impl DuckdbEngine {
         if let (Some(acks), true) = (&self.webhook_acks, materialized.is_ok()) {
             acks.lock().unwrap_or_else(|p| p.into_inner()).extend(pending);
             return Ok(format!(
-                "webhook: collected {} request(s) on :{} -> {}",
-                count, spec.port, spec.node_id
+                "webhook: collected {} request(s) ({} row(s)) on :{} -> {}",
+                accepted, count, spec.port, spec.node_id
             ));
         }
         // Persist-then-ack: 200 once the rows are durably written; 503 on
@@ -11801,8 +11809,8 @@ impl DuckdbEngine {
         }
         materialized?;
         Ok(format!(
-            "webhook: collected {} request(s) on :{} -> {}",
-            count, spec.port, spec.node_id
+            "webhook: collected {} request(s) ({} row(s)) on :{} -> {}",
+            accepted, count, spec.port, spec.node_id
         ))
     }
 
