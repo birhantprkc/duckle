@@ -1513,6 +1513,7 @@ fn run_validate() -> ExitCode {
     let mut affected_base: Option<String> = None;
     let mut affected_head = String::new();
     let mut affected_workspace = PathBuf::from(".");
+    let mut workspace_given = false;
     let mut include_uncertain = false;
     // #312: CI reads a format, not console text. `--json` stays exactly as it
     // was and is the same document as `--format json`, so nothing that already
@@ -1546,7 +1547,8 @@ fn run_validate() -> ExitCode {
             "--base" => affected_base = Some(it.next().unwrap_or_default()),
             "--head" => affected_head = it.next().unwrap_or_default(),
             "--workspace" => {
-                affected_workspace = it.next().map(PathBuf::from).unwrap_or(affected_workspace)
+                affected_workspace = it.next().map(PathBuf::from).unwrap_or(affected_workspace);
+                workspace_given = true
             }
             "--include-uncertain" => include_uncertain = true,
             "--pipeline" => match it.next() {
@@ -1653,7 +1655,24 @@ Refusing rather than reporting a clean run.",
                 serde_json::from_str::<PipelineDoc>(strip_bom(&text))
                     .map_err(|e| format!("parse: {e}"))
             })
-            .and_then(|doc| {
+            .and_then(|mut doc| {
+                // #166: a node may carry only `connectionRef`, and the saved
+                // connection supplies the auth props the builders require.
+                // Every run path resolves refs BEFORE it compiles; validate did
+                // not, so such a pipeline was failed here for a field the
+                // connection provides - `snk.salesforce: instanceUrl required`
+                // on a pipeline that runs perfectly. The shipped live-suite
+                // under docs/salesforce-sink is exactly that shape.
+                //
+                // Best effort: a workspace with no connection file, or one that
+                // cannot be decrypted, leaves the document untouched and the
+                // builder's own error stands.
+                let ws = if workspace_given {
+                    affected_workspace.clone()
+                } else {
+                    path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."))
+                };
+                let _ = duckle_secrets::resolve_connection_refs(&ws, &mut doc.nodes);
                 // #298: a dead property is not a compile error - the pipeline
                 // compiles perfectly and does the wrong thing. Checked here so
                 // the one surface whose whole job is to say "this is fine"
