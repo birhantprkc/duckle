@@ -97,15 +97,22 @@ RUN apt-get update \
 # The extensions Duckle LOADs, installed at build time so the image runs a
 # pipeline without reaching for the network - and so it runs one at all.
 #
-# An explicit `LOAD x` does NOT autoload. Measured on the pinned 1.5.5 against
-# an empty extension cache: `LOAD excel` fails with 'Extension "excel" not
-# found. Install it first', while a bare function call such as read_avro() or
-# array_cosine_similarity() autoloads happily. Duckle's stage prelude emits the
-# explicit LOAD, so without this every pipeline touching excel, iceberg, delta,
-# ducklake, vss or fts, and every ATTACH to postgres/mysql/sqlite, failed here
-# while working on the desktop, which pre-installs the same list at first
-# launch. `COPY ... (FORMAT xlsx)` fails even with autoload on, because
-# autoload does not cover COPY formats.
+# `LOAD x` autoinstalls for SOME extensions and not others, so relying on it is
+# relying on a split nobody documented. Measured on the pinned 1.5.5 into an
+# empty extension_directory: LOAD postgres, mysql, iceberg and delta download
+# and succeed, while LOAD excel, vss, fts, avro and httpfs fail with
+# 'Extension "x" not found. Install it first'. All of them report install_mode
+# REPOSITORY, so that is not the difference. (Measured on the Windows build;
+# the image is linux_amd64 and the split was not re-measured there, which is
+# another reason not to depend on it.) Autoload does not cover COPY formats at
+# all: with no excel extension, COPY ... (FORMAT xlsx) answers 'Copy Function
+# with name xlsx does not exist!'.
+#
+# Duckle emits a bare LOAD for excel, iceberg, delta, vss, fts and avro
+# (plan/builders.rs), and policy.rs drops EVERY prelude to a bare LOAD when a
+# workspace policy denies DuckDB external IO - which also turns autoinstall off
+# and refuses raw INSTALL, so in that mode the error's own advice cannot be
+# followed. Pre-installing here is what makes that mode usable.
 #
 # Cached under /root/.duckdb, keyed by the DuckDB version above, so the two stay
 # in step. spatial is left out on purpose: it is GDAL-backed and ~50 MB, and the
@@ -116,9 +123,22 @@ COPY --from=runner /usr/local/bin/duckle-lance /usr/local/bin/duckle-lance
 COPY --from=frontend /app/frontend/dist-web /app/dist-web
 # Feature parity with the desktop app: DuckDB engine and its extensions, the
 # LanceDB/Vortex sidecar, and a Python interpreter for code.python.
+# DUCKLE_PYTHON_BIN is deliberately NOT set. It takes precedence over the
+# workspace's own .venv (connectors.rs resolve_python_bin reads the variable
+# first and only then looks for .venv/bin/python3), and the README promises the
+# opposite: a .venv in the workspace "uses that interpreter on every machine,
+# laptop, CI and headless runner alike". Hardcoding it here made this image the
+# one machine where that is false - silently, because the same variable sets
+# `overridden` in pyenv::guard and so skips the #246 refusal that exists to
+# catch an unprepared target. A prepared .venv was ignored and the run went
+# green on /usr/bin/python3.
+#
+# Without it: no .venv means python3 on PATH, which apt installed above, so the
+# bare image is unchanged; a .venv is used as documented; and a workspace that
+# declares uv.lock with nothing installed now refuses loudly instead of running
+# quietly on the wrong interpreter.
 ENV DUCKLE_DUCKDB_BIN=/usr/local/bin/duckdb \
-    DUCKLE_LANCE_BIN=/usr/local/bin/duckle-lance \
-    DUCKLE_PYTHON_BIN=/usr/bin/python3
+    DUCKLE_LANCE_BIN=/usr/local/bin/duckle-lance
 VOLUME ["/workspace"]
 EXPOSE 8080
 # /healthz needs no credential and says only "ok", so orchestrators can check
