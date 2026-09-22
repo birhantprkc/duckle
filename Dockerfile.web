@@ -94,11 +94,28 @@ RUN apt-get update \
     && rm /tmp/duckdb.zip \
     && apt-get purge -y unzip && apt-get autoremove -y && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+# The extensions Duckle LOADs, installed at build time so the image runs a
+# pipeline without reaching for the network - and so it runs one at all.
+#
+# An explicit `LOAD x` does NOT autoload. Measured on the pinned 1.5.5 against
+# an empty extension cache: `LOAD excel` fails with 'Extension "excel" not
+# found. Install it first', while a bare function call such as read_avro() or
+# array_cosine_similarity() autoloads happily. Duckle's stage prelude emits the
+# explicit LOAD, so without this every pipeline touching excel, iceberg, delta,
+# ducklake, vss or fts, and every ATTACH to postgres/mysql/sqlite, failed here
+# while working on the desktop, which pre-installs the same list at first
+# launch. `COPY ... (FORMAT xlsx)` fails even with autoload on, because
+# autoload does not cover COPY formats.
+#
+# Cached under /root/.duckdb, keyed by the DuckDB version above, so the two stay
+# in step. spatial is left out on purpose: it is GDAL-backed and ~50 MB, and the
+# desktop omits it from its own pre-fetch for the same reason.
+RUN duckdb :memory: -c "INSTALL httpfs; INSTALL azure; INSTALL sqlite; INSTALL postgres; INSTALL mysql; INSTALL excel; INSTALL iceberg; INSTALL delta; INSTALL ducklake; INSTALL vss; INSTALL fts; INSTALL inet;"
 COPY --from=runner /usr/local/bin/duckle-runner /usr/local/bin/duckle-runner
 COPY --from=runner /usr/local/bin/duckle-lance /usr/local/bin/duckle-lance
 COPY --from=frontend /app/frontend/dist-web /app/dist-web
-# Feature parity with the desktop app: DuckDB engine, the LanceDB/Vortex sidecar,
-# and a Python interpreter for code.python are all wired up.
+# Feature parity with the desktop app: DuckDB engine and its extensions, the
+# LanceDB/Vortex sidecar, and a Python interpreter for code.python.
 ENV DUCKLE_DUCKDB_BIN=/usr/local/bin/duckdb \
     DUCKLE_LANCE_BIN=/usr/local/bin/duckle-lance \
     DUCKLE_PYTHON_BIN=/usr/bin/python3
