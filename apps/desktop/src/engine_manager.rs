@@ -576,8 +576,14 @@ const DUCKDB_EXTENSIONS: &[&str] = &[
     "ducklake", // DuckLake: DuckDB-native lakehouse catalog
     "vss",      // Vector similarity search (array_* distance funcs)
     "fts",      // Full-text search (BM25 keyword scoring)
-    // The avro community extension hasn't published for v1.4+ yet; src.avro
-    // is marked preview in the palette until it catches up.
+    // avro is deliberately absent, and not for the reason this comment used to
+    // give: it does publish for the pinned version, and src.avro is `available`
+    // rather than preview. src.avro reads through the pure-Rust apache-avro
+    // crate (connectors.rs run_avro_source), so it needs no extension at all -
+    // verified by running an avro pipeline against an empty extension cache.
+    // The only path that reaches DuckDB's avro is the format dispatch used by
+    // inspect, and `read_avro` autoloads on demand, which a bare `LOAD` does
+    // not.
 ];
 
 fn duckdb_command(bin: &Path) -> std::process::Command {

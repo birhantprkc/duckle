@@ -1471,6 +1471,25 @@ kept verbatim under `body`.
 /// Best-effort about the INPUTS and exact about the answer: a workspace with no
 /// subscriptions, or no catalog yet, has no loops to report, and neither is an
 /// error - `validate` is run on workspaces that have never built a graph. What
+/// Why `validate --affected` cannot take a revision for `--head`.
+///
+/// `affected_cmd::select` returns NO paths at all when head is set, and says
+/// why in its own comment: a revision has no files on disk to point at. Every
+/// selected pipeline was therefore unlocatable, so the command exited 2 with
+/// "selected but could not be located", which reads like a broken workspace
+/// rather than a flag that cannot work - and when the range happened to touch
+/// no pipeline it exited 0 having validated nothing.
+///
+/// `duckle-runner affected` still takes `--head`, and should: it only PRINTS a
+/// selection, which is where comparing two commits is meaningful.
+fn affected_head_refusal(head: &str) -> Option<String> {
+    (!head.trim().is_empty()).then(|| {
+        "--head names a committed revision, which has no files on disk to validate. \
+         Check it out and pass --base only."
+            .to_string()
+    })
+}
+
 /// it must never do is stay quiet when it can see one.
 fn workspace_trigger_cycles() -> Vec<String> {
     use duckle_duckdb_engine::{catalog, subscribe};
@@ -1551,6 +1570,10 @@ fn run_validate() -> ExitCode {
     if let Some(base) = affected_base {
         if base.trim().is_empty() {
             eprintln!("duckle-runner validate --affected: --base <rev> is required");
+            return ExitCode::from(2);
+        }
+        if let Some(why) = affected_head_refusal(&affected_head) {
+            eprintln!("duckle-runner validate --affected: {why}");
             return ExitCode::from(2);
         }
         let selection = affected_cmd::select(
@@ -2222,6 +2245,26 @@ fn review_findings(
 
 #[cfg(test)]
 mod tests {
+
+    /// `validate --affected --head <rev>` had two outcomes and neither was
+    /// useful: exit 2 blaming the workspace when the range touched a pipeline,
+    /// exit 0 having validated nothing when it did not. Measured on this repo
+    /// before the refusal: `--base b532f6f^ --head b532f6f` listed 27 pipelines
+    /// as "selected but could not be located".
+    #[test]
+    fn validate_affected_refuses_a_head_revision() {
+        assert!(
+            super::affected_head_refusal("").is_none(),
+            "no --head is the working-tree comparison, which is the useful one"
+        );
+        assert!(super::affected_head_refusal("   ").is_none(), "blank is not a revision");
+        let why = super::affected_head_refusal("b532f6f").expect("a revision must be refused");
+        assert!(
+            why.contains("--base"),
+            "the refusal has to say what to do instead, not just say no: {why}"
+        );
+    }
+
     use super::*;
 
     /// A before version that does not compile is the ordinary shape of a fix
