@@ -8880,10 +8880,21 @@ function synthAiTransform(comp: ComponentDef): ComponentManifest {
             {
                 label: 'Classify',
                 fields: [
+                    {
+                        key: 'provider',
+                        label: 'Decision engine',
+                        kind: 'select',
+                        defaultValue: 'openai',
+                        options: [
+                            { label: 'Chat model (OpenAI-compatible)', value: 'openai' },
+                            { label: 'Jev evaluation model (Vercel AI Gateway)', value: 'jev' },
+                        ],
+                        description: 'A chat model is asked for the label and its prose is matched back to your list, so an off-list reply becomes UNKNOWN. Jev is asked a typed choice question whose options ARE your labels, so it cannot answer off-list, and it also writes <output column>_confidence with the probability it gave the label it picked.',
+                    },
                     { key: 'inputColumn', label: 'Text column', kind: 'column', required: true },
                     { key: 'categories', label: 'Labels', kind: 'text', required: true, placeholder: 'positive, neutral, negative', description: 'Comma-separated candidate labels.' },
-                    { key: 'model', label: 'Model', kind: 'text', defaultValue: 'gpt-4o-mini' },
-                    { key: 'apiKey', label: 'API key', kind: 'text', placeholder: '••••••••' },
+                    { key: 'model', label: 'Model', kind: 'text', defaultValue: 'gpt-4o-mini', description: 'Left empty, a chat provider uses gpt-4o-mini and Jev uses typesafe-ai/jev.' },
+                    { key: 'apiKey', label: 'API key', kind: 'text', placeholder: '••••••••' , description: 'For Jev this is a Vercel AI Gateway API key, sent as a bearer token.' },
                     { key: 'outputColumn', label: 'Output column', kind: 'text', defaultValue: 'category' },
                     ...aiCustomEndpointFields(),
                     ...aiThroughputFields(),

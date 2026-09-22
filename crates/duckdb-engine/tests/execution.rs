@@ -11811,6 +11811,131 @@ fn code_javascript_undefined_return_errors_not_panics() {
     );
 }
 
+/// xf.ai.classify through Jev, which cannot answer outside the category list.
+///
+/// Jev is an evaluation model: it takes state and typed questions and returns a
+/// decision with probabilities. It is not on the chat-completions surface at all
+/// ("It is not supported through the OpenAI-compatible... endpoints"), so this
+/// path posts to /v1/evaluate with a `choice` question whose criteria ARE the
+/// categories. Two things follow that the chat path cannot offer: the answer is
+/// in-set by construction rather than by a post-hoc match that silently yields
+/// "UNKNOWN", and the probability of the chosen option is available, which this
+/// node has never had.
+#[test]
+fn ai_classify_through_jev_answers_in_set_and_reports_its_probability() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let engine = engine_or_skip!();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let cap = captured.clone();
+    let handle = std::thread::spawn(move || {
+        // One request per row, answering in the documented evaluation shape.
+        let replies = [("positive", 0.91_f64), ("negative", 0.77_f64)];
+        for (idx, stream) in incoming_bounded(&listener, 2).enumerate() {
+            let Ok(mut stream) = stream else { break };
+            stream.set_read_timeout(Some(Duration::from_millis(500))).ok();
+            stream.set_nodelay(true).ok();
+            let mut buf = Vec::with_capacity(8192);
+            let mut chunk = [0u8; 4096];
+            for _ in 0..16 {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            cap.lock().unwrap().push(String::from_utf8_lossy(&buf).to_string());
+            let (choice, p) = replies[idx.min(replies.len() - 1)];
+            let other = if choice == "positive" { "negative" } else { "positive" };
+            let body = format!(
+                r#"{{"model":"typesafe-ai/jev","answers":{{"category":{{"type":"choice","choice":"{}","probabilities":{{"{}":{},"{}":{}}}}}}},"usage":{{"inputTokens":12,"outputTokens":0}}}}"#,
+                choice,
+                choice,
+                p,
+                other,
+                1.0 - p
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.write_all(body.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let in_csv = write_file(tmp.path(), "in.csv", "id,text\n1,loved it\n2,hated it\n");
+    let out = out_path(tmp.path(), "out.csv");
+    let base = format!("http://127.0.0.1:{port}");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": in_csv, "hasHeader": true })),
+            node("c", "xf.ai.classify", json!({
+                "provider": "jev",
+                "inputColumn": "text",
+                "categories": "positive, negative",
+                "outputColumn": "category",
+                "apiKey": "gw-test-key",
+                "baseUrl": base,
+            })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "c"), main_edge("e2", "c", "k")]),
+    ));
+    let _ = handle.join();
+    assert_eq!(r.status, "ok", "jev classify failed: {:?}", r.error);
+
+    // The decision lands in the output column, and its probability beside it.
+    let cat1 = scalar_string(&format!(
+        "SELECT category FROM read_csv_auto('{}') WHERE id = 1",
+        out
+    ));
+    assert_eq!(cat1, "positive");
+    let conf1 = scalar_string(&format!(
+        "SELECT CAST(category_confidence AS VARCHAR) FROM read_csv_auto('{}') WHERE id = 1",
+        out
+    ));
+    assert!(conf1.starts_with("0.91"), "the chosen option's probability: {conf1}");
+    let cat2 = scalar_string(&format!(
+        "SELECT category FROM read_csv_auto('{}') WHERE id = 2",
+        out
+    ));
+    assert_eq!(cat2, "negative");
+
+    // And the request is the evaluation contract, not a chat completion.
+    let reqs = captured.lock().unwrap();
+    let first = reqs.first().expect("a request reached the stub").clone();
+    assert!(first.starts_with("POST /v1/evaluate "), "wrong route: {}", first.lines().next().unwrap_or(""));
+    assert!(
+        first.contains("Authorization: Bearer gw-test-key"),
+        "the gateway key must be sent as a bearer token"
+    );
+    let body_start = first.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+    let body: serde_json::Value =
+        serde_json::from_str(&first[body_start..]).expect("the body is JSON");
+    assert_eq!(body["model"], "typesafe-ai/jev");
+    assert_eq!(body["state"], "loved it", "the row's text is the state");
+    assert_eq!(body["questions"]["category"]["type"], "choice");
+    let criteria = body["questions"]["category"]["criteria"]
+        .as_object()
+        .expect("choice criteria are required and carry the options");
+    let mut options: Vec<&String> = criteria.keys().collect();
+    options.sort();
+    assert_eq!(
+        options,
+        vec!["negative", "positive"],
+        "the criteria ARE the categories - that is what makes the answer in-set"
+    );
+}
+
 /// xf.ai.dedupe: pre-stage rows with embedding column, run dedupe at
 /// a tight threshold, verify the near-duplicate row is dropped.
 /// Uses CSV input where the embedding column is a JSON array literal

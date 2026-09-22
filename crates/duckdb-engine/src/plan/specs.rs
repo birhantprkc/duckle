@@ -1404,6 +1404,11 @@ pub struct AiLlmSpec {
 /// not in the category list).
 #[derive(Debug, Clone)]
 pub struct AiClassifySpec {
+    /// Which decision surface answers. `openai` sends a constrained prompt to
+    /// chat completions and matches the reply back to the list; `jev` posts a
+    /// typed `choice` question to an evaluation model, which cannot answer
+    /// outside the criteria and returns a probability for what it picked.
+    pub provider: String,
     /// #258: a hard ceiling on what this stage may spend.
     pub budget: AiBudgetSpec,
     pub node_id: String,

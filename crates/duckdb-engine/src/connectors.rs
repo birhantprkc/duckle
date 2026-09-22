@@ -12936,8 +12936,25 @@ impl DuckdbEngine {
             materialize_empty_like_view(&self.bin, db, &spec.node_id, &spec.from_view)?;
             return Ok(format!("ai.classify: 0 upstream rows -> {}", spec.node_id));
         }
-        let endpoint = Self::ai_endpoint(&spec.base_url, &spec.endpoint_path, "/v1/chat/completions");
+        // Jev is an evaluation model and is not on the chat-completions
+        // surface at all, so the route moves with the provider.
+        let jev = spec.provider == "jev";
+        let endpoint = Self::ai_endpoint(
+            &spec.base_url,
+            &spec.endpoint_path,
+            if jev { "/v1/evaluate" } else { "/v1/chat/completions" },
+        );
         let cat_list = spec.categories.join(", ");
+        // A `choice` question's criteria are REQUIRED and are the options
+        // themselves, which is what makes the answer in-set by construction
+        // rather than by matching prose back to the list afterwards.
+        let jev_criteria: serde_json::Map<String, JsonValue> = spec
+            .categories
+            .iter()
+            .map(|c| (c.clone(), JsonValue::Null))
+            .collect();
+        let jev_instructions =
+            format!("Classify the text into exactly one of these categories: {}.", cat_list);
         let system_prompt = format!(
             "You are a strict classifier. Pick exactly one of these categories: {}. \
              Reply with only the category name and nothing else.",
@@ -13005,14 +13022,28 @@ impl DuckdbEngine {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let body = serde_json::json!({
-                "model": spec.model,
-                "temperature": 0.0,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
-            });
+            let body = if jev {
+                serde_json::json!({
+                    "model": spec.model,
+                    "state": text,
+                    "questions": {
+                        "category": {
+                            "type": "choice",
+                            "instructions": jev_instructions,
+                            "criteria": jev_criteria,
+                        }
+                    },
+                })
+            } else {
+                serde_json::json!({
+                    "model": spec.model,
+                    "temperature": 0.0,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                    ],
+                })
+            };
             let response = engine.ai_send_with_retry(
                 &|| Self::ai_post(&endpoint, &spec.headers, &spec.api_key),
                 &body.to_string(),
@@ -13028,15 +13059,36 @@ impl DuckdbEngine {
                 stopped.store(true, std::sync::atomic::Ordering::SeqCst);
                 return Ok(row.clone());
             };
-            let raw = response
-                .pointer("/choices/0/message/content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            // An evaluation answer carries the decision and, optionally, how
+            // sure it was. `probabilities` is documented as optional on a
+            // choice, so a missing one is a null confidence, not a failure.
+            let (raw, confidence) = if jev {
+                let answer = response.pointer("/answers/category");
+                let choice = answer
+                    .and_then(|a| a.get("choice"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let p = answer
+                    .and_then(|a| a.get("probabilities"))
+                    .and_then(|v| v.get(&choice))
+                    .and_then(|v| v.as_f64());
+                (choice, p)
+            } else {
+                let raw = response
+                    .pointer("/choices/0/message/content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                (raw, None)
+            };
             // Constrain to the supplied category list; anything not
             // in it becomes UNKNOWN so downstream pipelines don't
-            // see surprise values.
+            // see surprise values. On the evaluation path this can only
+            // re-spell the answer in the user's own casing, because the model
+            // was never offered anything else.
             let chosen = spec
                 .categories
                 .iter()
@@ -13048,6 +13100,18 @@ impl DuckdbEngine {
                 _ => serde_json::Map::new(),
             };
             obj.insert(spec.output_column.clone(), JsonValue::String(chosen));
+            // Only the evaluation path has a probability to report. Writing the
+            // column unconditionally would put an always-null column into every
+            // existing pipeline's output.
+            if jev {
+                obj.insert(
+                    format!("{}_confidence", spec.output_column),
+                    confidence
+                        .and_then(serde_json::Number::from_f64)
+                        .map(JsonValue::Number)
+                        .unwrap_or(JsonValue::Null),
+                );
+            }
             let produced = JsonValue::Object(obj);
             // Recorded as this item finishes, not when the stage does: a
             // failure on the next row keeps everything already bought.

@@ -1294,7 +1294,7 @@ COMPONENTS = {
     'xf.ai.classify': {
         'kind': 'transform',
         'summary': 'Per-row LLM-backed classification. Props: inputColumn (default `text`), outputColumn (default `category`), categories (required, comma-separated list), model (default `gpt-4o-mini`), apiKey, baseUrl. The model is prompted to pick exactly one category; anything outside the list normalizes to `UNKN...',
-        'params': ['inputColumn', 'categories', 'model', 'apiKey', 'outputColumn', 'baseUrl', 'endpointPath', 'headers', 'concurrency', 'checkpoint', 'checkpointKey', 'checkpointFingerprint', 'maxRetries', 'maxRequests', 'maxInputTokens', 'maxOutputTokens', 'maxEstimatedCostUsd', 'inputUsdPerMillionTokens', 'outputUsdPerMillionTokens'],
+        'params': ['provider', 'inputColumn', 'categories', 'model', 'apiKey', 'outputColumn', 'baseUrl', 'endpointPath', 'headers', 'concurrency', 'checkpoint', 'checkpointKey', 'checkpointFingerprint', 'maxRetries', 'maxRequests', 'maxInputTokens', 'maxOutputTokens', 'maxEstimatedCostUsd', 'inputUsdPerMillionTokens', 'outputUsdPerMillionTokens'],
     },
     'xf.ai.dedupe': {
         'kind': 'transform',

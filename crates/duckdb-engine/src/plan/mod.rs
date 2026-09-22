@@ -6372,7 +6372,14 @@ fn build_stage(
                 component_id
             )));
         }
+        // An evaluation model is a different endpoint, a different body and a
+        // different answer, so the defaults for model and host follow it.
+        let provider = string_prop(&props, "provider")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "openai".into());
+        let jev = provider == "jev";
         ai_classify = Some(AiClassifySpec {
+            provider: provider.clone(),
             budget: AiBudgetSpec::read(&props),
             checkpoint: props
                 .get("checkpoint")
@@ -6390,13 +6397,13 @@ fn build_stage(
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "category".into()),
             categories,
-            model: string_prop(&props, "model")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "gpt-4o-mini".into()),
+            model: string_prop(&props, "model").filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                if jev { "typesafe-ai/jev".into() } else { "gpt-4o-mini".into() }
+            }),
             api_key,
-            base_url: string_prop(&props, "baseUrl")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "https://api.openai.com".into()),
+            base_url: string_prop(&props, "baseUrl").filter(|s| !s.is_empty()).unwrap_or_else(|| {
+                if jev { "https://ai-gateway.vercel.sh".into() } else { "https://api.openai.com".into() }
+            }),
             headers: headers_from_props(&props),
             endpoint_path: string_prop(&props, "endpointPath").filter(|s| !s.is_empty()),
             // #258: default 1 keeps every existing pipeline byte-identical.
