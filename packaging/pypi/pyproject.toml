@@ -27,10 +27,10 @@ classifiers = [
 
 # The engine. duckdb-cli is published by the DuckDB Foundation (MIT) and puts a
 # real `duckdb` executable on PATH, which is what the runner shells out to.
-# Pinned to the version Duckle pins in .duckdb-cli-v1.5.4 so a pip install is
+# Pinned to the version Duckle pins in .duckdb-cli-v1.5.5 so a pip install is
 # reproducible and needs no first-run download - which is what keeps it usable
 # on a machine with no outbound network at run time.
-dependencies = ["duckdb-cli==1.5.4"]
+dependencies = ["duckdb-cli==1.5.5"]
 
 [project.urls]
 Homepage = "https://duckle.org"

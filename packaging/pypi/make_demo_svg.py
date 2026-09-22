@@ -198,8 +198,8 @@ AGENT = [
 PIP = [
     ("cmd", "pip install duckle"),
     ("dim", "Downloading duckle-0.5.9-py3-none-win_amd64.whl (23.0 MB)"),
-    ("dim", "Downloading duckdb_cli-1.5.4-py3-none-win_amd64.whl (12.9 MB)"),
-    ("ok",  "Successfully installed duckdb-cli-1.5.4 duckle-0.5.9"),
+    ("dim", "Downloading duckdb_cli-1.5.5-py3-none-win_amd64.whl (12.9 MB)"),
+    ("ok",  "Successfully installed duckdb-cli-1.5.5 duckle-0.5.9"),
     ("out", ""),
     ("dim", "# three commands, and the engine, on your PATH:"),
     ("dim", "#   duckle   duckle-mcp   duckdb"),

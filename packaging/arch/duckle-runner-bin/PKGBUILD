@@ -13,7 +13,7 @@ arch=('x86_64')
 # Measured, not assumed: installed to /usr/bin there is no bin/duckdb beside
 # the runner, so DuckDB resolution falls through to PATH. Without this the
 # package installs cleanly and then cannot run a single pipeline. Arch's
-# duckdb is 1.5.5 where Duckle pins 1.5.4, and a real pipeline ran on it.
+# duckdb is 1.5.5, which is what Duckle pins, and a real pipeline ran on it.
 depends=('duckdb')
 url="https://github.com/slothflowlabs/duckle"
 license=('MIT OR Apache-2.0')

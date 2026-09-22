@@ -4,14 +4,14 @@
 // its catch_unwind. The default panic hook prints the real panic payload to
 // stderr BEFORE catch_unwind swallows it (the GUI just has no console).
 //
-//   DUCKLE_DUCKDB_BIN=.duckdb-cli-v1.5.4/duckdb.exe \
+//   DUCKLE_DUCKDB_BIN=.duckdb-cli-v1.5.5/duckdb.exe \
 //   cargo run --example inspect_mssql -p duckle-duckdb-engine
 use duckle_duckdb_engine::DuckdbEngine;
 use serde_json::json;
 
 fn main() {
     let duckdb = std::env::var("DUCKLE_DUCKDB_BIN")
-        .unwrap_or_else(|_| r".duckdb-cli-v1.5.4\duckdb.exe".into());
+        .unwrap_or_else(|_| r".duckdb-cli-v1.5.5\duckdb.exe".into());
     let table = std::env::var("MSSQL_TABLE").unwrap_or_else(|_| "three_ints".into());
     let eng = DuckdbEngine::new(duckdb.into());
 

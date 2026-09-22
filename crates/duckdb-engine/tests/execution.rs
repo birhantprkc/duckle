@@ -11385,6 +11385,81 @@ fn a_rename_mapping_file_with_a_byte_order_mark_still_binds() {
     assert_eq!(header, "b,alpha,gamma", "the renames did not land: {header}");
 }
 
+/// A server that sends no caching headers at all is still usable.
+///
+/// Plenty of endpoints answer with neither `Last-Modified` nor `ETag`: Python's
+/// http.server, small Flask and FastAPI handlers, plenty of internal APIs. That
+/// used to be enough to fail a run on the ENGINE, not on anything Duckle does.
+///
+/// duckdb-httpfs c3f215ab, which DuckDB 1.5.4 pins, declares
+/// `timestamp_t last_modified` with no in-class initializer and leaves it out of
+/// the HTTPFileHandle constructor's member-initializer list, and it is only
+/// assigned under `if (res->headers.HasHeader("Last-Modified"))`. With no such
+/// header the field keeps whatever the heap held. DuckDB's external file cache
+/// stores it and `ExternalFileCache::IsValid` computes
+/// `access_time - current_last_modified`, which throws "Out of Range Error:
+/// Overflow in timestamp subtraction" when that garbage lands near INT64_MIN. An
+/// ETag would have short-circuited the comparison before the subtraction, which
+/// is why a stub sending either header never saw it.
+///
+/// Measured on the bare CLI before the pin moved: 2 failures in 60 runs on 1.5.4
+/// against a stub sending neither header, 0 in 60 with Last-Modified, 0 in 60
+/// with an ETag, and 0 in 60 on 1.5.5, whose httpfs initialises the field.
+///
+/// The check is a loop because the trigger is uninitialised memory: one run has
+/// only about a 4% chance of catching a regression, ten have about a third. It
+/// is deterministic in the passing direction, which is what a pinned 1.5.5 owes.
+#[test]
+fn an_http_source_works_against_a_server_that_sends_no_caching_headers() {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    let engine = engine_or_skip!();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock http");
+    let port = listener.local_addr().unwrap().port();
+    let body = r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#.to_string();
+    // Deliberately no Date, no Last-Modified and no ETag. Do not "fix" this
+    // stub by adding them: sending nothing is the whole point of the test.
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            stream.set_read_timeout(Some(Duration::from_millis(400))).ok();
+            let req = drain_http_request(&mut stream);
+            let head_only = req.starts_with("HEAD");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Accept-Ranges: bytes\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                if head_only { "" } else { body.as_str() }
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+        }
+    });
+
+    let url = format!("http://127.0.0.1:{}/rows.json", port);
+    let tmp = tempfile::tempdir().unwrap();
+    for attempt in 0..10 {
+        let out = out_path(tmp.path(), &format!("out{attempt}.csv"));
+        let r = engine.execute_pipeline(&doc(
+            json!([
+                node("s", "src.http", json!({ "url": url, "format": "array" })),
+                node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ]),
+            json!([main_edge("e1", "s", "k")]),
+        ));
+        assert_eq!(
+            r.status, "ok",
+            "attempt {attempt} failed against a server sending no caching headers, \
+             which needs DuckDB 1.5.5 or newer: {:?}",
+            r.error
+        );
+        assert_eq!(count(&format!("read_csv_auto('{}')", out)), 2, "both rows, attempt {attempt}");
+    }
+}
+
 /// #84: spatial functions in a SQL Template over a CSV source - the spatial
 /// extension auto-loads because the SQL references ST_Point.
 #[test]

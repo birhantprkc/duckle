@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const DUCKDB_VERSION: &str = "1.5.4";
+pub const DUCKDB_VERSION: &str = "1.5.5";
 pub const SLOTHDB_VERSION: &str = "0.2.7";
 /// Pinned llama.cpp build. Bump periodically; the GGUF wire format
 /// is stable so newer server binaries keep working with older models.

@@ -3752,7 +3752,7 @@ Duckle ships a thin shell and installs its engines on first launch.
 
 | Engine | Role | Status |
 |---|---|---|
-| **DuckDB** | Default execution engine: analytics, file formats, cloud reads, SQL pushdown. Tracking **v1.5.3** (latest stable). A lock-free single-SELECT read (`Engine::query`) powers dives. | Working |
+| **DuckDB** | Default execution engine: analytics, file formats, cloud reads, SQL pushdown. Tracking **v1.5.5** (latest stable). A lock-free single-SELECT read (`Engine::query`) powers dives. | Working |
 | **Duckie AI Assistant** | Local chat assistant via **llama.cpp** + **Qwen 2.5 Coder 1.5B GGUF**. Downloads ~1.1 GB and needs no network once installed, or point it at your own OpenAI-compatible endpoint and skip the download entirely. Managed as a `llama-server` subprocess exposing an OpenAI-compatible API on `127.0.0.1`. | Installable |
 | **SlothDB** | Alternate embedded analytical engine ([SouravRoy-ETL/slothdb](https://github.com/SouravRoy-ETL/slothdb)), installed the same way and selectable per pipeline. | Installable |
 | **Native** | In-process Rust streaming / incremental engine. | Planned |
