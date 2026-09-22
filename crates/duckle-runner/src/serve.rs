@@ -252,6 +252,31 @@ struct LiveRun {
 const MAX_REMEMBERED_RUNS: usize = 200;
 
 /// #259: mint an id for an accepted run. The counter distinguishes two runs of
+/// The console credential as supplied, refusing one that was supplied empty.
+///
+/// `DUCKLE_CONSOLE_TOKEN=` is what an unresolved secret reference looks like:
+/// the deployment believes it passed a credential, the variable exists, and its
+/// value is the empty string. Folding that into "no credential given" silently
+/// opens the claim window on a server whose operator had every reason to think
+/// it was locked, so it is refused rather than downgraded.
+///
+/// Both start paths call this. They had the rule separately and drifted: `serve`
+/// refused, `web` filtered the empty value away and carried on - and `web` is
+/// what the published image runs.
+fn supplied_console_token(
+    arg: Option<String>,
+    env: Option<String>,
+) -> Result<Option<String>, String> {
+    let supplied = arg.or(env);
+    if supplied.as_deref().is_some_and(|t| t.trim().is_empty()) {
+        return Err(
+            "a console credential was supplied but is empty. Set DUCKLE_CONSOLE_TOKEN (or              --token) to a real value, or remove it entirely to set the server up from a browser. Refusing to start rather than opening an administrator claim window."
+                .to_string(),
+        );
+    }
+    Ok(supplied)
+}
+
 /// the same pipeline inside one millisecond.
 fn new_run_id(pipeline_id: &str) -> String {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -292,21 +317,9 @@ pub fn run() -> Result<(), String> {
     // it. That is a deliberate trade, and it is only sound when "no credential"
     // means the operator chose not to supply one.
     //
-    // An empty value is NOT that. `DUCKLE_CONSOLE_TOKEN=` is what an unresolved
-    // secret reference looks like: the deployment believes it passed a
-    // credential, the variable exists, and its value is the empty string. Folding
-    // that into "no credential given" silently opened the claim window on a
-    // server whose operator had every reason to think it was locked. It is a
-    // misconfiguration, so it is refused rather than downgraded.
-    let supplied = args.token.clone().or_else(|| std::env::var("DUCKLE_CONSOLE_TOKEN").ok());
-    if supplied.as_deref().is_some_and(|t| t.trim().is_empty()) {
-        return Err(
-            "a console credential was supplied but is empty. Set DUCKLE_CONSOLE_TOKEN (or \
-             --token) to a real value, or remove it entirely to set the server up from a browser. Refusing to start rather than opening an administrator claim window."
-                .to_string(),
-        );
-    }
-    let token = supplied;
+    // An empty value is NOT that, and `supplied_console_token` says why.
+    let token =
+        supplied_console_token(args.token.clone(), std::env::var("DUCKLE_CONSOLE_TOKEN").ok())?;
     let console = console_auth::Console::configure(&workspace, &args.host, token.as_deref())?;
     let console_open = console.is_open();
 
@@ -509,11 +522,8 @@ pub fn run_web() -> Result<(), String> {
     // The editor writes files, edits connections and runs pipelines, so it is
     // at least as powerful as the console and gets the same rule: loopback is
     // open, anything else needs a credential before the socket is bound.
-    let token = args
-        .token
-        .clone()
-        .or_else(|| std::env::var("DUCKLE_CONSOLE_TOKEN").ok())
-        .filter(|t| !t.trim().is_empty());
+    let token =
+        supplied_console_token(args.token.clone(), std::env::var("DUCKLE_CONSOLE_TOKEN").ok())?;
     let console = console_auth::Console::configure(&workspace, &args.host, token.as_deref())?;
     let console_open = console.is_open();
 
@@ -7641,6 +7651,58 @@ mod tests {
             "the connection has no read deadline, so a stalled caller pins the thread"
         );
         sender.join().unwrap();
+    }
+
+    /// Both start paths refuse a credential that was supplied and is empty.
+    ///
+    /// `DUCKLE_CONSOLE_TOKEN=` is what an unresolved secret reference looks
+    /// like: the deployment believes it passed a credential, the variable
+    /// exists, and its value is the empty string. `serve` refuses to start on
+    /// that, and says why. `web` filtered it away instead and carried on as
+    /// though nothing had been supplied - so on a first deployment the same
+    /// misconfiguration left an administrator claim window open rather than
+    /// stopping, on the path that is the published image's ENTRYPOINT.
+    ///
+    /// Read from the source because both paths bind a socket before the
+    /// decision is observable, and counted rather than merely searched for, so
+    /// it cannot pass by matching nothing. The needle is built from pieces so
+    /// it cannot match itself in this file.
+    #[test]
+    fn both_server_paths_refuse_a_supplied_but_empty_console_credential() {
+        let src = include_str!("serve.rs");
+        let needle = format!("{}(args.token.clone()", "supplied_console_token");
+        let calls = src.matches(needle.as_str()).count();
+        assert_eq!(
+            calls, 2,
+            "serve and web must answer an empty credential the same way and from one \
+             place; found {calls} call(s)"
+        );
+    }
+
+    /// The rule itself: absent is a choice, empty is a mistake.
+    #[test]
+    fn an_empty_console_credential_is_a_misconfiguration_not_an_absence() {
+        assert_eq!(super::supplied_console_token(None, None), Ok(None), "nothing supplied");
+        assert_eq!(
+            super::supplied_console_token(None, Some("s3cret".into())),
+            Ok(Some("s3cret".into())),
+            "the environment carries it"
+        );
+        assert_eq!(
+            super::supplied_console_token(Some("arg".into()), Some("env".into())),
+            Ok(Some("arg".into())),
+            "an explicit argument wins"
+        );
+        for empty in ["", "   ", "\t"] {
+            assert!(
+                super::supplied_console_token(None, Some(empty.into())).is_err(),
+                "an unresolved secret reference ({empty:?}) must refuse, not downgrade"
+            );
+            assert!(
+                super::supplied_console_token(Some(empty.into()), None).is_err(),
+                "and the same through --token ({empty:?})"
+            );
+        }
     }
 
     /// #295: a killed process must not strand a backfill forever.
