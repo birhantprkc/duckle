@@ -9967,19 +9967,26 @@ fn a_json_shape_on_an_http_source_means_json_not_csv() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock http");
     let port = listener.local_addr().unwrap().port();
     let body = r#"[{"id":1,"name":"a"},{"id":2,"name":"b"}]"#.to_string();
-    let handle = std::thread::spawn(move || {
-        for stream in listener.incoming().take(8) {
-            let mut stream = match stream {
-                Ok(s) => s,
-                Err(_) => break,
-            };
-            stream.set_read_timeout(Some(Duration::from_millis(250))).ok();
-            let mut chunk = [0u8; 4096];
-            let n = stream.read(&mut chunk).unwrap_or(0);
-            let req = String::from_utf8_lossy(&chunk[..n]).to_string();
+    // Serve for as long as the run needs, detached, like this file's other
+    // stubs. A fixed budget cannot work here: measured, httpfs opens SIX
+    // connections for this pipeline - HEAD, GET, then a HEAD for each later
+    // pass - so a budget of eight left room for one retry, and a loaded windows
+    // runner used it. The ninth request was refused and the COPY failed with
+    // "Could not connect to server", which reads like a product bug.
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            stream.set_read_timeout(Some(Duration::from_millis(400))).ok();
+            // Headers then exactly Content-Length more: a short read is not a
+            // finished request, which is the flake nobody can reproduce.
+            let req = drain_http_request(&mut stream);
+            // A HEAD answer carries no body. httpfs reads Content-Length bytes,
+            // so a body here would be read as the start of the next response.
             let head_only = req.starts_with("HEAD");
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Date: Sun, 21 Sep 2026 10:00:00 GMT\r\n\
+                 Last-Modified: Sun, 21 Sep 2026 09:00:00 GMT\r\n\
                  Accept-Ranges: bytes\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 if head_only { "" } else { body.as_str() }
@@ -10002,7 +10009,6 @@ fn a_json_shape_on_an_http_source_means_json_not_csv() {
         ]),
         json!([main_edge("e1", "s", "k")]),
     ));
-    drop(handle);
     assert_eq!(r.status, "ok", "run failed: {:?}", r.error);
 
     let written = std::fs::read_to_string(&out).unwrap();
