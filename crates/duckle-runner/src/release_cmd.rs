@@ -89,7 +89,12 @@ fn dependency_gate(workspace: &Path, release: &Release) -> Vec<String> {
         }
         let compiled = serde_json::from_slice::<duckle_duckdb_engine::PipelineDoc>(&bytes)
             .map_err(|e| format!("parse: {e}"))
-            .and_then(|d| {
+            .and_then(|mut d| {
+                // A node may carry only `connectionRef`, and the saved connection
+                // supplies its auth props. Without resolving first this gate
+                // reports "does not compile" for a pipeline that runs, and
+                // refuses to cut the release over it.
+                let _ = duckle_secrets::resolve_connection_refs(workspace, &mut d.nodes);
                 duckle_duckdb_engine::compile_pipeline_sql(&d).map_err(|e| e.to_string())
             });
         if let Err(e) = compiled {

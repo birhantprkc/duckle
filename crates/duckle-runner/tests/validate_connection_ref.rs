@@ -1,4 +1,5 @@
-//! `duckle-runner validate`, run as the real binary, against a saved connection.
+//! The CLI surfaces that read a pipeline holding only a `connectionRef`,
+//! run as the real binary: `validate` and `review`.
 
 /// A node that carries only `connectionRef` validates.
 ///
@@ -101,5 +102,82 @@ fn a_connection_ref_that_resolves_to_nothing_still_fails() {
         !out.status.success(),
         "a reference to a connection that does not exist is not a valid pipeline: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// A review reports the plan change on a pipeline that uses a saved connection.
+///
+/// `review` compares the compiled plan of two versions, and the engine's
+/// `plan_sql_map` is best effort by design: a side that will not compile yields
+/// an EMPTY map, and `planChanged` then falls back to false. So an unresolved
+/// `connectionRef` did not merely fail loudly - it made the tool answer
+/// "plan changed: no" for a change that rewrote the WHERE clause, in the
+/// feature whose whole job is showing a reviewer what changed.
+///
+/// Measured before the fix, on exactly this fixture:
+///   before compiles : no
+///   after compiles  : no
+///     after error   : config: snk.salesforce: instanceUrl required
+///   plan changed: no
+#[test]
+fn a_review_sees_the_plan_change_through_a_saved_connection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    std::fs::create_dir_all(ws.join("connections")).unwrap();
+    std::fs::write(
+        ws.join("connections").join("sf.json"),
+        r#"{"kind":"salesforce","authMode":"clientCredentials",
+            "loginUrl":"https://example.my.salesforce.com",
+            "clientId":"cid","clientSecret":"secret"}"#,
+    )
+    .unwrap();
+    std::fs::write(ws.join("rows.csv"), "Name\nAcme\n").unwrap();
+
+    // The two versions differ only in the filter predicate, which IS compiled
+    // into SQL, so a working review must call the plan changed.
+    let side = |name: &str, predicate: &str| {
+        let path = ws.join(format!("{name}.json"));
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"nodes":[
+                     {{"id":"s","type":"source","position":{{"x":0,"y":0}},
+                       "data":{{"label":"In","componentId":"src.csv",
+                               "properties":{{"path":"rows.csv","hasHeader":true}}}}}},
+                     {{"id":"f","type":"transform","position":{{"x":100,"y":0}},
+                       "data":{{"label":"F","componentId":"xf.filter",
+                               "properties":{{"predicate":"{predicate}"}}}}}},
+                     {{"id":"k","type":"sink","position":{{"x":200,"y":0}},
+                       "data":{{"label":"Out","componentId":"snk.salesforce",
+                               "properties":{{"connectionRef":"sf","object":"Account",
+                                             "operation":"insert","apiVersion":"v60.0"}}}}}}],
+                   "edges":[{{"id":"e1","source":"s","target":"f"}},
+                            {{"id":"e2","source":"f","target":"k"}}]}}"#
+            ),
+        )
+        .unwrap();
+        path
+    };
+    let before = side("before", "Name IS NOT NULL");
+    let after = side("after", "Name <> 'Acme'");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_duckle-runner"))
+        .arg("review")
+        .arg("--before")
+        .arg(&before)
+        .arg("--after")
+        .arg(&after)
+        .output()
+        .expect("the runner starts");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        stdout.contains("plan changed: yes"),
+        "the predicate changed, so the compiled plan did; reporting otherwise is the \
+         one thing a review must not do:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("instanceUrl required"),
+        "a side was compiled without resolving its connection:\n{stdout}"
     );
 }

@@ -1907,8 +1907,22 @@ fn run_review() -> Result<i32, String> {
         let text = std::fs::read_to_string(p).map_err(|e| format!("read {}: {e}", p.display()))?;
         serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {}: {e}", p.display()))
     };
-    let bv = load(&before)?;
-    let av = load(&after)?;
+    let mut bv = load(&before)?;
+    let mut av = load(&after)?;
+    // Resolve saved connections on both sides before anything reads the plan.
+    // `plan_sql_map` in the engine is best effort: a side that fails to compile
+    // yields an EMPTY map and `planChanged` then falls back to false, so a
+    // pipeline whose credentials come from a connection would have reported its
+    // plan as unchanged however much the plan changed. The workspace is the one
+    // given, else each file's own parent, matching a run.
+    let ws_for = |p: &Path| -> PathBuf {
+        workspace_arg
+            .clone()
+            .or_else(|| p.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    let _ = duckle_secrets::resolve_connection_refs_value(&ws_for(&before), &mut bv);
+    let _ = duckle_secrets::resolve_connection_refs_value(&ws_for(&after), &mut av);
 
     // Compile status of each side. A change that breaks compilation is the gate.
     let compiles = |v: &serde_json::Value| -> Result<(), String> {

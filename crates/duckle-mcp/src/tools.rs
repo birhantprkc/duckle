@@ -644,7 +644,20 @@ fn load_side(args: &Value, inline: &str, path: &str) -> Result<Value, String> {
         Ok(p.clone())
     } else if let Some(pth) = arg_str(args, path) {
         let text = std::fs::read_to_string(pth).map_err(|e| format!("read {pth}: {e}"))?;
-        serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {pth}: {e}"))
+        let mut doc: Value =
+            serde_json::from_str(strip_bom(&text)).map_err(|e| format!("parse {pth}: {e}"))?;
+        // A node may hold only `connectionRef`. The engine's plan comparison is
+        // best effort - a side that will not compile yields an empty plan map
+        // and `planChanged` falls back to false - so an unresolved side would
+        // report a changed plan as unchanged. Resolved against the file's own
+        // parent, which is the workspace a run would use. An inline object has
+        // no file and therefore no workspace, so it is left as given.
+        let ws = std::path::Path::new(pth)
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let _ = duckle_secrets::resolve_connection_refs_value(&ws, &mut doc);
+        Ok(doc)
     } else {
         Err(format!("provide '{inline}' (object) or '{path}' (string)"))
     }

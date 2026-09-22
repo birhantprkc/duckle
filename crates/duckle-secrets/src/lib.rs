@@ -707,6 +707,35 @@ fn merge_generic_connection(
 /// Resolve saved-connection references on every node in a pipeline document, in
 /// place. Call BEFORE the `${ENV:...}` pass so a connection field stored as a
 /// placeholder still expands afterwards.
+/// The same resolution for a document held as raw JSON.
+///
+/// A caller that is going to DIFF or hash a document cannot round-trip it
+/// through `PipelineDoc` first: serde drops whatever the struct does not model,
+/// and a diff would then report those fields as absent on both sides. This
+/// walks the value and rewrites only each node's properties in place.
+pub fn resolve_connection_refs_value(
+    workspace: &Path,
+    doc: &mut JsonValue,
+) -> Result<(), String> {
+    let Some(nodes) = doc.get_mut("nodes").and_then(|n| n.as_array_mut()) else {
+        return Ok(());
+    };
+    for node in nodes.iter_mut() {
+        let Some(component_id) = node
+            .pointer("/data/componentId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(props) = node.pointer_mut("/data/properties") else {
+            continue;
+        };
+        resolve_connection_ref_props(workspace, &component_id, props)?;
+    }
+    Ok(())
+}
+
 pub fn resolve_connection_refs(workspace: &Path, nodes: &mut [PipelineNode]) -> Result<(), String> {
     for node in nodes.iter_mut() {
         let Some(component_id) = node.data.component_id.clone() else {
