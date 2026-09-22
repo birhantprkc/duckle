@@ -281,6 +281,82 @@ fn is_loopback_endpoint(endpoint: &str) -> bool {
 /// Send a user message + prior history to the running llama-server,
 /// stream tokens out via the `on_event` callback as they arrive. The
 /// system prompt is prepended automatically.
+/// One entry from an OpenAI-compatible `/v1/models` listing.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ModelChoice {
+    pub id: String,
+    /// What the endpoint says this model is for. OpenAI itself sends no such
+    /// field, so `None` means "an ordinary chat model" rather than "unknown".
+    pub kind: Option<String>,
+    /// Whether it can answer a chat completion at all, which is the only thing
+    /// the assistant can use. See [`usable_for_chat`].
+    pub chat: bool,
+}
+
+/// Whether a listed model can serve the assistant.
+///
+/// Vercel's AI Gateway tags every entry with a `type`, and most of them cannot
+/// hold a conversation: an embedding, a transcription or an image model would
+/// fail on the first request. `typesafe-ai/jev` is tagged `evaluation` and
+/// carries `max_tokens: 0` - it returns typed decisions and emits no text at
+/// all, so offering it here would be offering a broken assistant. An endpoint
+/// that sends no `type` (OpenAI, Ollama, LM Studio, vLLM) is taken at its word.
+fn usable_for_chat(kind: Option<&str>) -> bool {
+    matches!(kind, None | Some("language") | Some("chat"))
+}
+
+/// Parse an OpenAI-compatible `/v1/models` body into choices, chat models
+/// first and each group sorted by id.
+pub fn parse_models(body: &serde_json::Value) -> Vec<ModelChoice> {
+    let items = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out: Vec<ModelChoice> = items
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let kind = m.get("type").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let chat = usable_for_chat(kind.as_deref());
+            Some(ModelChoice { id, kind, chat })
+        })
+        .collect();
+    out.sort_by(|a, b| b.chat.cmp(&a.chat).then_with(|| a.id.cmp(&b.id)));
+    out.dedup_by(|a, b| a.id == b.id);
+    out
+}
+
+/// List what an OpenAI-compatible endpoint offers, so a model can be picked
+/// rather than typed from memory.
+///
+/// The key is optional on purpose: Vercel's AI Gateway answers this route
+/// unauthenticated, so the list can be browsed before a key exists. OpenAI
+/// requires one and says so in its own error, which is passed through.
+pub fn list_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<ModelChoice>, String> {
+    let endpoint = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    // Same split as chat: a remote host needs the shared agent for OS roots and
+    // the configured proxy; loopback must not go through that proxy.
+    let mut req = if is_loopback_endpoint(&endpoint) {
+        ureq::get(&endpoint)
+    } else {
+        duckle_duckdb_engine::tls::http_agent().get(&endpoint)
+    };
+    req = req.timeout(Duration::from_secs(30));
+    if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
+        req = req.set("Authorization", &format!("Bearer {}", key));
+    }
+    let body: serde_json::Value = req
+        .call()
+        .map_err(|e| format!("list models: {}", e))?
+        .into_json()
+        .map_err(|e| format!("list models: {}", e))?;
+    Ok(parse_models(&body))
+}
+
 pub fn chat_stream<F: FnMut(ChatEvent)>(
     endpoint: &str,
     api_key: Option<&str>,
@@ -416,6 +492,50 @@ mod tests {
         let pipe = extract_pipeline(text).expect("should parse");
         assert_eq!(pipe["nodes"].as_array().unwrap().len(), 2);
         assert_eq!(pipe["edges"].as_array().unwrap().len(), 1);
+    }
+
+    /// A listing offers only what can actually hold a conversation.
+    ///
+    /// Vercel's AI Gateway tags every entry, and most of the 380 it returns are
+    /// not chat models. `typesafe-ai/jev` is the one tagged `evaluation`: it
+    /// returns typed decisions with probabilities and emits no text at all
+    /// (`max_tokens: 0`), and evaluation is not served over chat completions at
+    /// all. Offering it as the assistant's model would be offering a control
+    /// that cannot work. An endpoint that sends no `type` at all - OpenAI,
+    /// Ollama, LM Studio - is taken at its word.
+    #[test]
+    fn a_listing_separates_models_that_can_chat_from_those_that_cannot() {
+        let body = serde_json::json!({
+            "data": [
+                { "id": "openai/gpt-4.1-mini", "type": "language" },
+                { "id": "typesafe-ai/jev", "type": "evaluation", "max_tokens": 0 },
+                { "id": "openai/text-embedding-3-small", "type": "embedding" },
+                { "id": "anthropic/claude-sonnet-4", "type": "language" },
+                { "id": "llama3.1" },
+                { "id": "" }
+            ]
+        });
+        let got = super::parse_models(&body);
+        let ids: Vec<&str> = got.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "anthropic/claude-sonnet-4",
+                "llama3.1",
+                "openai/gpt-4.1-mini",
+                "openai/text-embedding-3-small",
+                "typesafe-ai/jev",
+            ],
+            "chat models first, each group sorted, and the empty id dropped"
+        );
+        let jev = got.iter().find(|m| m.id == "typesafe-ai/jev").unwrap();
+        assert!(!jev.chat, "an evaluation model cannot answer the assistant");
+        assert_eq!(jev.kind.as_deref(), Some("evaluation"), "and it says why");
+        assert!(
+            got.iter().find(|m| m.id == "llama3.1").unwrap().chat,
+            "an endpoint that declares no type is an ordinary chat endpoint"
+        );
+        assert!(!got.iter().find(|m| m.id == "openai/text-embedding-3-small").unwrap().chat);
     }
 
     #[test]

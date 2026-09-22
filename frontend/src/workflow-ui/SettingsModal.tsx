@@ -6,6 +6,8 @@ import {
     settingsSetProxy,
     settingsGetAi,
     settingsSetAi,
+    aiModels,
+    type AiModelChoice,
     settingsGetMemoryLimit,
     settingsGetAllowUnsigned,
     settingsGetPower,
@@ -43,6 +45,9 @@ export function SettingsModal({
     const [aiBaseUrl, setAiBaseUrl] = useState('');
     const [aiModel, setAiModel] = useState('');
     const [aiKey, setAiKey] = useState('');
+    const [aiChoices, setAiChoices] = useState<AiModelChoice[] | null>(null);
+    const [aiListError, setAiListError] = useState('');
+    const [aiListing, setAiListing] = useState(false);
     // #102: per-workspace total memory cap in MB (empty = engine default).
     const [memLimit, setMemLimit] = useState('');
     // #143: allow loading unsigned / community DuckDB extensions (off by default).
@@ -449,6 +454,53 @@ export function SettingsModal({
                             autoComplete="off"
                             style={{ ...aiInput, marginTop: 8 }}
                         />
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                            <button
+                                type="button"
+                                onClick={async () => {
+                                    setAiListing(true);
+                                    setAiListError('');
+                                    try {
+                                        const got = await aiModels(workspace ?? '', aiBaseUrl || null, aiKey || null);
+                                        setAiChoices(got);
+                                        if (got.length === 0) setAiListError('That endpoint listed no models.');
+                                    } catch (e) {
+                                        setAiChoices(null);
+                                        setAiListError(e instanceof Error ? e.message : String(e));
+                                    } finally {
+                                        setAiListing(false);
+                                    }
+                                }}
+                                disabled={!loaded || !workspace || !aiBaseUrl || aiListing}
+                                style={{ ...aiInput, width: 'auto', cursor: 'pointer' }}
+                            >
+                                {aiListing ? 'Fetching...' : 'Fetch models'}
+                            </button>
+                            {aiChoices && aiChoices.some(m => m.chat) && (
+                                <select
+                                    value=""
+                                    onChange={e => e.target.value && setAiModel(e.target.value)}
+                                    style={{ ...aiInput, flex: 1 }}
+                                >
+                                    <option value="">
+                                        {aiChoices.filter(m => m.chat).length} model(s) - pick one
+                                    </option>
+                                    {aiChoices.filter(m => m.chat).map(m => (
+                                        <option key={m.id} value={m.id}>{m.id}</option>
+                                    ))}
+                                </select>
+                            )}
+                        </div>
+                        {aiListError && <p style={{ ...help, color: '#f0803c' }}>{aiListError}</p>}
+                        {aiChoices && aiChoices.some(m => !m.chat) && (
+                            <p style={help}>
+                                {aiChoices.filter(m => !m.chat).length} of {aiChoices.length} listed
+                                models are not chat models and are left out: embedding, image,
+                                transcription and evaluation models cannot answer the assistant.
+                                Jev is one of them - it returns typed decisions rather than text, and
+                                it is available on the Classify node instead.
+                            </p>
+                        )}
                         <input
                             type="password"
                             value={aiKey}

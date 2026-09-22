@@ -220,6 +220,7 @@ pub fn run() {
             seed_sample_workspace,
             import_job_file,
             chat_send,
+            ai_models,
             chat_extract_pipeline,
             workspace_git_status,
             workspace_git_init,
@@ -1236,6 +1237,28 @@ fn import_job_file(path: String) -> Result<JobImport, String> {
 }
 
 // ---- AI chat assistant -------------------------------------------------
+
+/// What the configured AI endpoint offers, so the assistant's model can be
+/// chosen from a list instead of typed from memory.
+///
+/// Falls back to the workspace's saved base URL when none is supplied, which is
+/// what the Settings panel does before anything has been saved.
+#[tauri::command]
+async fn ai_models(
+    base_url: Option<String>,
+    api_key: Option<String>,
+    workspace: Option<String>,
+) -> Result<Vec<llama_chat::ModelChoice>, String> {
+    let (saved_base, _, saved_key) = app_settings::ai_config(workspace.as_deref().unwrap_or(""));
+    let base = base_url
+        .filter(|b| !b.trim().is_empty())
+        .or(saved_base)
+        .ok_or_else(|| "set a base URL first".to_string())?;
+    let key = api_key.filter(|k| !k.trim().is_empty()).or(saved_key);
+    tokio::task::spawn_blocking(move || llama_chat::list_models(&base, key.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
 
 /// Send a message to the local Qwen model and stream tokens back over
 /// the `on_event` channel. Lazy-boots `llama-server` on the first call

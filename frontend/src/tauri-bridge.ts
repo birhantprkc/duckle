@@ -1513,6 +1513,25 @@ export async function settingsGetAi(workspace: string): Promise<AiConfig> {
     }
 }
 
+export type AiModelChoice = { id: string; kind: string | null; chat: boolean };
+
+/**
+ * What the configured endpoint offers, so a model can be picked rather than
+ * typed. Vercel's AI Gateway answers this without a key, so the list can be
+ * browsed before one exists; OpenAI requires one and says so itself.
+ *
+ * `chat: false` entries are listed but not offered: an embedding or evaluation
+ * model cannot answer the assistant at all.
+ */
+export async function aiModels(
+    workspace: string,
+    baseUrl: string | null,
+    apiKey: string | null,
+): Promise<AiModelChoice[]> {
+    if (!isTauri()) return [];
+    return await invoke<AiModelChoice[]>('ai_models', { workspace, baseUrl, apiKey });
+}
+
 /** Persist the external AI endpoint. Empty baseUrl reverts to the local model. */
 export async function settingsSetAi(
     workspace: string,
