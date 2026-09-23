@@ -604,6 +604,18 @@ Types: `string`, `integer`, `number`, `boolean`, `date`, `datetime`, `secret`.
 Constraints: `required`, `default`, `enum`, `minimum`, `maximum`, `pattern`,
 `description`.
 
+From the command line, one `--param` per value:
+
+```bash
+duckle-runner nightly.json --param jurisdiction=BE --param effective_date=2026-01-31
+```
+
+They go through the same check as every other surface, so `--param
+jurisdiction=FR` stops before anything runs (`jurisdiction is "FR", which is not
+one of the accepted values`). A `--param` without `=`, or the same name twice, is
+a usage error rather than a guess at which was meant, and the run record gives
+their source as `--param`.
+
 **Where a value came from is kept.** When two surfaces bind the same parameter -
 a schedule and the run that starts, say - the later one wins, which is a
 documented rule and not a clever one. What is not thrown away is that something

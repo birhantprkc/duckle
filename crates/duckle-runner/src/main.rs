@@ -126,6 +126,8 @@ OPTIONS:
                          `cache`). Nothing is read from or written to it, so a
                          run taken to check the cache does not overwrite it.
     --name <label>       Run-log + state folder name (default: pipeline file stem)
+    --param NAME=VALUE   A run parameter, repeatable. Checked against the types
+                         the pipeline declares, as on every other surface.
     --target <node>      Run only as far as this node, then stop and print its rows
                          (tab-separated, header first). Nothing downstream runs, so
                          no sink past it writes. The same run-from-here the desktop
@@ -180,6 +182,8 @@ struct Args {
     /// the issue asks for, and the reason this had to reach the run rather than
     /// only the planner.
     params: std::collections::BTreeMap<String, String>,
+    /// Where `params` came from, as a validation error or the run record says it.
+    param_source: String,
 }
 
 impl Args {
@@ -226,6 +230,9 @@ fn parse_args() -> Result<Args, String> {
     let mut clear_watermarks = Vec::new();
     let mut manifest = false;
     let mut verify_manifest = None;
+    // #317: --param NAME=VALUE, validated by the same typed boundary as every
+    // other surface once the run starts.
+    let mut params = std::collections::BTreeMap::new();
     // SQL type applied to the NEXT --set-watermark (so it can precede it).
     let mut pending_type = String::from("VARCHAR");
     let mut it = std::env::args().skip(1);
@@ -281,6 +288,19 @@ fn parse_args() -> Result<Args, String> {
             }
             "--clear-watermark" => clear_watermarks.push(take("--clear-watermark")?),
             "--manifest" => manifest = true,
+            "--param" => {
+                let spec = take("--param")?;
+                let (name, value) = spec
+                    .split_once('=')
+                    .map(|(n, v)| (n.trim().to_string(), v.to_string()))
+                    .filter(|(n, _)| !n.is_empty())
+                    .ok_or_else(|| format!("--param takes NAME=VALUE, got '{spec}'"))?;
+                // Two values for one name is a mistake to report, not a
+                // last-one-wins to guess at.
+                if params.insert(name.clone(), value).is_some() {
+                    return Err(format!("--param {name} is given more than once"));
+                }
+            }
             "--verify-manifest" => {
                 verify_manifest = Some(PathBuf::from(take("--verify-manifest")?))
             }
@@ -299,7 +319,8 @@ fn parse_args() -> Result<Args, String> {
         retry_of: None,
         output_bindings: Default::default(),
         skip_nodes: Default::default(),
-        params: Default::default(),
+        params,
+        param_source: "--param".to_string(),
         target,
         pipeline,
         workspace,
@@ -481,7 +502,7 @@ fn run_with(args: Args) -> Result<bool, String> {
             .map(|(name, value)| duckle_duckdb_engine::params::Supplied {
                 name: name.clone(),
                 value: value.clone(),
-                source: "retry of the original run".to_string(),
+                source: args.param_source.clone(),
             })
             .collect();
         context::apply_params_from(&mut doc, &supplied)?.0
@@ -2871,6 +2892,7 @@ fn run_retry() -> ExitCode {
         // old ones is the safety check the issue asks for, and replaying them
         // is what makes the check pass by construction rather than by luck.
         params: prior.parameters.clone(),
+        param_source: "retry of the original run".to_string(),
     };
     match run_with(args) {
         Ok(true) => ExitCode::from(0),
