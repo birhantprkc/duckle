@@ -17118,6 +17118,144 @@ impl DuckdbEngine {
         Ok(note)
     }
 
+    /// snk.delta: see DeltaSinkSpec. Creates the table from the input's columns
+    /// when it is missing, checks the columns match by name, then appends
+    /// through the delta extension.
+    pub(crate) fn run_delta_sink(&self, db: &Path, spec: &plan::DeltaSinkSpec) -> Result<String, EngineError> {
+        let config = |m: String| EngineError::Config(format!("snk.delta: {m}"));
+        let table_dir = std::path::Path::new(&spec.path);
+        let log_dir = table_dir.join("_delta_log");
+        let path_sql = spec.path.replace('\\', "/").replace('\'', "''");
+        let columns_of = |sql: &str| -> Result<Vec<(String, String)>, EngineError> {
+            Ok(self
+                .run_rows(Some(db), sql)?
+                .iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("column_name")?.as_str()?.to_string(),
+                        r.get("column_type")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect())
+        };
+        let input = columns_of(&format!("DESCRIBE SELECT * FROM {};", plan::quote_ident(&spec.from_view)))?;
+
+        let dir_existed = table_dir.exists();
+        let mut created = false;
+        let table: Vec<String> = if log_dir.is_dir() {
+            columns_of(&format!("LOAD delta; DESCRIBE SELECT * FROM delta_scan('{path_sql}');"))?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        } else {
+            if !spec.create_if_missing {
+                return Err(config(format!(
+                    "there is no Delta table at {} (no _delta_log) and createIfMissing is off",
+                    spec.path
+                )));
+            }
+            // Every column is checked before anything is written, so a type
+            // Delta cannot hold leaves no half-made table behind.
+            let mut fields = Vec::new();
+            let mut unsupported = Vec::new();
+            let mut naive_timestamps = false;
+            for (name, ty) in &input {
+                match duckdb_type_to_delta(ty) {
+                    Some(delta) => {
+                        naive_timestamps |= delta == "timestamp_ntz";
+                        fields.push(serde_json::json!({ "name": name, "type": delta, "nullable": true, "metadata": {} }));
+                    }
+                    None => unsupported.push(format!("{name} ({ty})")),
+                }
+            }
+            if !unsupported.is_empty() {
+                return Err(config(format!(
+                    "Delta has no column type for {} - cast it upstream (to VARCHAR, for example) before this node",
+                    unsupported.join(", ")
+                )));
+            }
+            // A naive timestamp is only legal under the timestampNtz table
+            // feature, which needs reader 3 / writer 7 to declare it.
+            let protocol = if naive_timestamps {
+                serde_json::json!({ "protocol": { "minReaderVersion": 3, "minWriterVersion": 7,
+                    "readerFeatures": ["timestampNtz"], "writerFeatures": ["timestampNtz"] } })
+            } else {
+                serde_json::json!({ "protocol": { "minReaderVersion": 1, "minWriterVersion": 2 } })
+            };
+            let metadata = serde_json::json!({ "metaData": {
+                "id": uuid::Uuid::new_v4().to_string(),
+                "format": { "provider": "parquet", "options": {} },
+                "schemaString": serde_json::json!({ "type": "struct", "fields": fields }).to_string(),
+                "partitionColumns": [],
+                "configuration": {},
+                "createdTime": chrono::Utc::now().timestamp_millis(),
+            } });
+            std::fs::create_dir_all(&log_dir)
+                .map_err(|e| config(format!("create {}: {e}", log_dir.display())))?;
+            // create_new: of two runs creating one table, only one may believe
+            // it wrote version 0.
+            let first = log_dir.join("00000000000000000000.json");
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&first)
+                .map_err(|e| config(format!("create {}: {e}", first.display())))?;
+            use std::io::Write as _;
+            writeln!(f, "{protocol}\n{metadata}").map_err(|e| config(format!("write {}: {e}", first.display())))?;
+            created = true;
+            input.iter().map(|(name, _)| name.clone()).collect()
+        };
+
+        // By name, both ways. A column the table lacks would have nowhere to go,
+        // and one the input lacks would be written as NULL; neither is chosen
+        // silently.
+        let missing: Vec<&str> = table
+            .iter()
+            .map(String::as_str)
+            .filter(|c| !input.iter().any(|(n, _)| n == c))
+            .collect();
+        let extra: Vec<&str> = input
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|c| !table.iter().any(|t| t == c))
+            .collect();
+        if !missing.is_empty() || !extra.is_empty() {
+            let mut why = Vec::new();
+            if !extra.is_empty() {
+                why.push(format!("the table has no column {}", extra.join(", ")));
+            }
+            if !missing.is_empty() {
+                why.push(format!("the input has no column {}", missing.join(", ")));
+            }
+            return Err(config(format!(
+                "the input does not match the table at {}: {}. Rename, drop or add columns upstream so they match",
+                spec.path,
+                why.join("; ")
+            )));
+        }
+
+        // The table's own column order, named. The extension's INSERT ... BY
+        // NAME fails an internal assertion, so the ordering is done here.
+        let cols = table.iter().map(|c| plan::quote_ident(c)).collect::<Vec<_>>().join(", ");
+        let insert = format!(
+            "LOAD delta; ATTACH '{path_sql}' AS duckle_delta (TYPE delta); INSERT INTO duckle_delta SELECT {cols} FROM {};",
+            plan::quote_ident(&spec.from_view)
+        );
+        if let Err(e) = self.run(Some(db), &insert, false) {
+            // A table this run created and could not fill is removed, so the
+            // next attempt is a clean create rather than an append to a stub.
+            if created {
+                let _ = if dir_existed {
+                    std::fs::remove_dir_all(&log_dir)
+                } else {
+                    std::fs::remove_dir_all(table_dir)
+                };
+            }
+            return Err(e);
+        }
+        Ok(format!("delta: appended to {}{}", spec.path, if created { " (created it)" } else { "" }))
+    }
+
     /// Best-effort type of a column from a sample non-null row, e.g.
     /// "BIGINT" / "TIMESTAMP". None when the upstream has no rows to probe.
     fn probe_column_type(&self, db: &Path, up_q: &str, col_q: &str) -> Option<String> {
@@ -19214,6 +19352,33 @@ fn read_kafka_offset_state(path: &std::path::Path, topic: &str, partition: i32) 
 
 /// Read a saved DuckLake snapshot id from CDC state. Missing / unreadable
 /// reads as "no prior snapshot".
+/// The Delta column type for a DuckDB type, or None when Delta has none. A
+/// naive TIMESTAMP is `timestamp_ntz`; Delta's `timestamp` is an instant.
+fn duckdb_type_to_delta(ty: &str) -> Option<String> {
+    let t = ty.trim().to_ascii_uppercase();
+    let simple = match t.as_str() {
+        "BOOLEAN" => "boolean",
+        "TINYINT" => "byte",
+        "SMALLINT" => "short",
+        "INTEGER" => "integer",
+        "BIGINT" => "long",
+        "FLOAT" => "float",
+        "DOUBLE" => "double",
+        "VARCHAR" => "string",
+        "BLOB" => "binary",
+        "DATE" => "date",
+        "TIMESTAMP" => "timestamp_ntz",
+        "TIMESTAMP WITH TIME ZONE" => "timestamp",
+        _ => {
+            let inner = t.strip_prefix("DECIMAL(")?.strip_suffix(')')?;
+            let (p, s) = inner.split_once(',')?;
+            let (p, s): (u32, u32) = (p.trim().parse().ok()?, s.trim().parse().ok()?);
+            return (p <= 38).then(|| format!("decimal({p},{s})"));
+        }
+    };
+    Some(simple.to_string())
+}
+
 /// The columns src.postgres.cdc puts before a change's own values.
 const PG_CDC_META: &[&str] = &["_op", "_lsn", "_xid", "_commit_ts"];
 

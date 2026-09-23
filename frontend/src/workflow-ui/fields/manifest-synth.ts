@@ -2253,6 +2253,19 @@ function synthLakehouseSource(comp: ComponentDef): ComponentManifest {
 }
 
 function synthLakehouseSink(comp: ComponentDef): ComponentManifest {
+    if (comp.id === 'snk.delta') {
+        // Append-only: DuckDB's delta extension appends to a table but cannot
+        // replace one, so there is no overwrite mode to offer.
+        return base(comp, [
+            {
+                label: 'Table',
+                fields: [
+                    { key: 'path', label: 'Table directory', kind: 'text', required: true, placeholder: '/data/lake/orders', description: 'The Delta table directory, the one holding _delta_log. Local paths for now: a table on object storage is refused until writing there has been tested.' },
+                    { key: 'createIfMissing', label: 'Create the table if missing', kind: 'bool', defaultValue: true, description: 'Creates the table from the input columns and their types on the first run. Off, a missing table is an error, so a mistyped path cannot quietly start a new table.' },
+                ],
+            },
+        ]);
+    }
     if (comp.id === 'snk.ducklake') {
         return base(comp, [
             {

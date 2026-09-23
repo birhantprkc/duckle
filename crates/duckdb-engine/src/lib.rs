@@ -2354,6 +2354,8 @@ impl DuckdbEngine {
                     Some(RuntimeSpec::SnowflakeSink(spec)) => {
                         self.run_snowflake_sink(&db_path, &secret_prefix, spec)
                     }
+                    // Local Delta Lake append, creating the table on first use.
+                    Some(RuntimeSpec::DeltaSink(spec)) => self.run_delta_sink(&db_path, spec),
                     Some(RuntimeSpec::DatabricksSink(spec)) => {
                         self.run_databricks_sink(&db_path, &secret_prefix, spec)
                     }

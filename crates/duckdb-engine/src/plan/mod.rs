@@ -379,6 +379,8 @@ pub enum RuntimeSpec {
     DuckLakeCdc(DuckLakeCdcSpec),
     /// src.postgres.cdc: log-based PostgreSQL change feed (see PgCdcSpec).
     PgCdc(PgCdcSpec),
+    /// snk.delta: local Delta Lake append (see DeltaSinkSpec).
+    DeltaSink(DeltaSinkSpec),
     Webhook(WebhookSpec),
     SnowflakeSink(SnowflakeSinkSpec),
     DatabricksSink(DatabricksSinkSpec),
@@ -1939,6 +1941,7 @@ fn build_stage(
     let mut incremental: Option<IncrementalSpec> = None;
     let mut ducklake_cdc: Option<DuckLakeCdcSpec> = None;
     let mut pg_cdc: Option<PgCdcSpec> = None;
+    let mut delta_sink: Option<DeltaSinkSpec> = None;
     let mut snowflake_sink: Option<SnowflakeSinkSpec> = None;
     let mut databricks_sink: Option<DatabricksSinkSpec> = None;
     let mut salesforce_sink: Option<SalesforceSinkSpec> = None;
@@ -2723,6 +2726,28 @@ fn build_stage(
         vortex_sink = Some(VortexSinkSpec {
             from_view: from_view.to_string(),
             path,
+        });
+        (String::new(), StageKind::Sink, Some(from_view.to_string()))
+    } else if component_id == "snk.delta" {
+        // Above the `snk.` catch-all, which would otherwise claim it.
+        let from_view = inputs.main().ok_or_else(|| missing_input(node, "main"))?;
+        let path = string_prop(&props, "path")
+            .map(|p| p.trim().trim_end_matches(['/', '\\']).to_string())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| EngineError::Config(format!("{}: path required (the table's directory)", component_id)))?;
+        // A table on object storage means writing its first commit there too,
+        // and that has not been run against real storage yet. Refused rather
+        // than shipped untested.
+        if path.contains("://") {
+            return Err(EngineError::Config(format!(
+                "{}: writes to a local table directory for now; '{}' is remote. Write locally and copy, or use the Iceberg or DuckLake sink for object storage",
+                component_id, path
+            )));
+        }
+        delta_sink = Some(DeltaSinkSpec {
+            from_view: from_view.to_string(),
+            path,
+            create_if_missing: props.get("createIfMissing").and_then(|v| v.as_bool()).unwrap_or(true),
         });
         (String::new(), StageKind::Sink, Some(from_view.to_string()))
     } else if component_id == "snk.snowflake" {
@@ -7005,6 +7030,7 @@ fn build_stage(
         .or_else(|| incremental.map(RuntimeSpec::Incremental))
         .or_else(|| ducklake_cdc.map(RuntimeSpec::DuckLakeCdc))
         .or_else(|| pg_cdc.map(RuntimeSpec::PgCdc))
+        .or_else(|| delta_sink.map(RuntimeSpec::DeltaSink))
         .or_else(|| webhook.map(RuntimeSpec::Webhook))
         .or_else(|| remote_exec.map(RuntimeSpec::RemoteExec))
         .or_else(|| snowflake_sink.map(RuntimeSpec::SnowflakeSink))

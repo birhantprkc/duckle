@@ -85,6 +85,20 @@ pub struct PgCdcSpec {
     pub max_lag_mb: u64,
 }
 
+/// snk.delta: append to a local Delta Lake table, creating it on first use.
+///
+/// DuckDB's delta extension appends to an existing table but cannot create
+/// one, so a missing table is created by writing its first commit - protocol
+/// and schema, from the input's own columns - and the append goes through the
+/// extension. Columns are matched by name and a mismatch in either direction is
+/// refused, never dropped or NULL-filled.
+#[derive(Debug, Clone)]
+pub struct DeltaSinkSpec {
+    pub from_view: String,
+    pub path: String,
+    pub create_if_missing: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct TextSearchSpec {
     pub from_view: String,

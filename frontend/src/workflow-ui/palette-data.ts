@@ -537,6 +537,7 @@ export const PALETTE: Category[] = [
                 components: [
                     snk('iceberg', 'Apache Iceberg', 'available', 'Write a full Iceberg table (data/ + metadata/) via DuckDB v1.5'),
                     snk('ducklake', 'DuckLake', 'available', 'Write a table into a DuckLake catalog'),
+                    snk('delta', 'Delta Lake', 'available', 'Append to a local Delta Lake table, creating it from the input columns on first use. Columns are matched by name and a mismatch is refused, never dropped or filled with NULL.'),
                 ],
             },
             {

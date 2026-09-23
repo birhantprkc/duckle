@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "componentCount": 412,
+  "componentCount": 413,
   "components": [
     {
       "id": "src.csv",
@@ -31942,6 +31942,62 @@
                     "value": "json"
                   }
                 ]
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
+            }
+          ],
+          "outputs": []
+        }
+      }
+    },
+    {
+      "id": "snk.delta",
+      "label": "Delta Lake",
+      "kind": "sink",
+      "availability": "available",
+      "summary": "Append to a local Delta Lake table, creating it from the input columns on first use. Columns are matched by name and a mismatch is refused, never dropped or filled with NULL.",
+      "ports": {
+        "inputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ],
+        "outputs": []
+      },
+      "manifest": {
+        "id": "snk.delta",
+        "kind": "sink",
+        "label": "Delta Lake",
+        "description": "Append to a local Delta Lake table, creating it from the input columns on first use. Columns are matched by name and a mismatch is refused, never dropped or filled with NULL.",
+        "schemaSource": "autodetect",
+        "sections": [
+          {
+            "label": "Table",
+            "fields": [
+              {
+                "key": "path",
+                "label": "Table directory",
+                "kind": "text",
+                "required": true,
+                "placeholder": "/data/lake/orders",
+                "description": "The Delta table directory, the one holding _delta_log. Local paths for now: a table on object storage is refused until writing there has been tested."
+              },
+              {
+                "key": "createIfMissing",
+                "label": "Create the table if missing",
+                "kind": "bool",
+                "defaultValue": true,
+                "description": "Creates the table from the input columns and their types on the first run. Off, a missing table is an error, so a mistyped path cannot quietly start a new table."
               }
             ]
           }

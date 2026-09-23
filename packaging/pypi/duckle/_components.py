@@ -344,6 +344,11 @@ COMPONENTS = {
         'summary': 'Write to IBM DB2 through the IBM Data Server ODBC driver. Creates the table if missing from the upstream column types; Append adds rows, Overwrite clears it first. Booleans land in SMALLINT as 1/0, which DB2 for z/OS also accepts. No upsert.',
         'params': ['host', 'port', 'database', 'user', 'password', 'useSsl', 'driver', 'dsn', 'connectionString', 'schema', 'tableName', 'mode'],
     },
+    'snk.delta': {
+        'kind': 'sink',
+        'summary': 'Append to a local Delta Lake table, creating it from the input columns on first use. Columns are matched by name and a mismatch is refused, never dropped or filled with NULL.',
+        'params': ['path', 'createIfMissing'],
+    },
     'snk.dhis2': {
         'kind': 'sink',
         'summary': 'Import rows into DHIS2. Set url to https://<host>/api/dataValueSets (importType aggregate) or https://<host>/api/tracker (importType tracker + trackerResource trackedEntities/events/enrollments/relationships). Rows are chunked (chunkSize, default 1000) and wrapped in the collection key DHIS2 expe...',
