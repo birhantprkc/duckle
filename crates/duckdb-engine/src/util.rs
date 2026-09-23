@@ -52,15 +52,18 @@ pub fn is_secret_prop_key(key: &str) -> bool {
     if NAMES_SOMETHING_PUBLIC.contains(&k.as_str()) {
         return false;
     }
-    [
-        "password", "passwd", "passphrase", "secret", "token", "apikey", "api_key",
-        "privatekey", "private_key", "accesskey", "access_key",
-        "clientsecret", "client_secret", "connectionstring", "connection_string",
-        "sas", "credential",
-    ]
-    .iter()
-    .any(|needle| k.contains(needle))
+    SECRET_NEEDLES.iter().any(|needle| k.contains(needle))
 }
+
+/// What a lowercased property key contains when it holds a credential. Public
+/// so the build bundler refines this list rather than keeping its own copy:
+/// its copy had lost `passphrase`, and bundled an SSH key's passphrase as typed.
+pub const SECRET_NEEDLES: [&str; 17] = [
+    "password", "passwd", "passphrase", "secret", "token", "apikey", "api_key",
+    "privatekey", "private_key", "accesskey", "access_key",
+    "clientsecret", "client_secret", "connectionstring", "connection_string",
+    "sas", "credential",
+];
 
 /// Every secret-keyed property in a pipeline whose value is a literal rather than a
 /// placeholder, named as `node label / property key`.

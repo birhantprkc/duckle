@@ -42,14 +42,11 @@ function arrayAfter(marker: string): string[] {
     return found;
 }
 
-// The needle list inside is_secret_prop_key, and the whole-key exclusions.
+// The needle list is_secret_prop_key matches on, and the whole-key exclusions.
 const fnAt = rust.indexOf('pub fn is_secret_prop_key');
 if (fnAt < 0) throw new Error('is_secret_prop_key not found in util.rs');
 const NOT_SECRET = arrayAfter('const NAMES_SOMETHING_PUBLIC');
-const needlesOpen = rust.indexOf('[', rust.indexOf('NAMES_SOMETHING_PUBLIC.contains'));
-const NEEDLES = [...rust.slice(needlesOpen, rust.indexOf(']', needlesOpen)).matchAll(/"([^"]+)"/g)].map(
-    m => m[1],
-);
+const NEEDLES = arrayAfter('pub const SECRET_NEEDLES');
 if (NEEDLES.length < 10) throw new Error(`only parsed ${NEEDLES.length} needles from util.rs`);
 
 const enginesSecret = (key: string): boolean => {
