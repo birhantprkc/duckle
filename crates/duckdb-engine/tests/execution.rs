@@ -13974,6 +13974,66 @@ fn a_returned_row_path_reaches_a_grandchild() {
     );
 }
 
+/// A child job whose node holds only a `connectionRef` gets its saved connection.
+///
+/// Every surface resolves refs on the document it was handed, and a child is not
+/// that document: it is read from disk here, inside the engine, when the parent
+/// reaches `ctl.runjob`. Measured before the fix, the same child file run two ways:
+///   directly         : got past config, reached the connection's login URL
+///   via ctl.runjob   : config: snk.salesforce: instanceUrl required
+/// ctl.foreach, ctl.iterate, batch workers and install fallbacks load their child
+/// the same way, so all of them failed the same way.
+///
+/// The login URL is under `.invalid`, reserved never to resolve, so the child fails
+/// at DNS without leaving the machine. Where it fails is the assertion: at the
+/// connection's endpoint, which only a resolved connection can have supplied.
+#[test]
+fn a_child_job_resolves_its_saved_connections() {
+    let _env = env_guard();
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = tmp.path();
+    std::fs::create_dir_all(ws.join("connections")).unwrap();
+    std::fs::write(
+        ws.join("connections").join("sf.json"),
+        r#"{"kind":"salesforce","authMode":"clientCredentials",
+            "loginUrl":"https://login.example.invalid",
+            "clientId":"cid","clientSecret":"secret"}"#,
+    )
+    .unwrap();
+    let csv = write_file(ws, "rows.csv", "Name\nAcme\n");
+    let child_val = json!({
+        "nodes": [
+            node("cs", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("ck", "snk.salesforce", json!({
+                "connectionRef": "sf", "object": "Account",
+                "operation": "insert", "apiVersion": "v60.0"
+            })),
+        ],
+        "edges": [ main_edge("ce", "cs", "ck") ]
+    });
+    let child_path = write_file(ws, "child.json", &serde_json::to_string(&child_val).unwrap());
+
+    std::env::set_var("DUCKLE_WORKSPACE", ws);
+    let parent = doc(
+        json!([node("rj", "ctl.runjob", json!({ "pipelineRef": child_path }))]),
+        json!([]),
+    );
+    let result = engine.execute_pipeline(&parent);
+    std::env::remove_var("DUCKLE_WORKSPACE");
+
+    let error = result.error.unwrap_or_default();
+    assert!(
+        !error.contains("instanceUrl required"),
+        "the child ran without its saved connection: {error}"
+    );
+    assert!(
+        error.contains("login.example.invalid"),
+        "the child should fail reaching the connection's own login URL, which proves \
+         the connection was applied; it failed elsewhere: {error}"
+    );
+}
+
 #[test]
 fn runjob_resolves_bare_pipeline_id_via_workspace_env() {
     // A Run Job stored by the workspace picker carries a bare pipeline id

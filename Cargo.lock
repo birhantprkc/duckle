@@ -4362,6 +4362,7 @@ dependencies = [
  "dom_query 0.28.0",
  "duckle-metadata",
  "duckle-plugin-sdk",
+ "duckle-secrets",
  "flate2",
  "futures-util",
  "glob",

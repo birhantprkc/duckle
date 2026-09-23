@@ -16560,9 +16560,20 @@ impl DuckdbEngine {
             ).collect()
         };
         content = substitute_into_child(&content, &merged);
-        let sub_doc: plan::PipelineDoc = serde_json::from_str(strip_bom(&content)).map_err(|e| {
+        let mut sub_doc: plan::PipelineDoc = serde_json::from_str(strip_bom(&content)).map_err(|e| {
             EngineError::Config(format!("sub-pipeline: parse '{}': {}", path, e))
         })?;
+        // A node may hold only `connectionRef`, the saved connection supplying
+        // its auth. Every surface resolves refs on the document it was handed,
+        // and a child is not that document - it is read from disk right here -
+        // so a child using a saved connection failed for a field the connection
+        // provides. Every child path (runjob, iterate, foreach, batch items,
+        // install fallback) comes through this function, so this is the one
+        // place, and an unresolvable ref fails the child as it fails a run.
+        if let Some(ws) = std::env::var("DUCKLE_WORKSPACE").ok().filter(|w| !w.is_empty()) {
+            duckle_secrets::resolve_connection_refs(std::path::Path::new(&ws), &mut sub_doc.nodes)
+                .map_err(|e| EngineError::Config(format!("sub-pipeline '{}': {}", path, e)))?;
+        }
         // Run it under the CHILD's own name. Unnamed, every sub-pipeline shared
         // one run-log folder and - far worse - one `xf.incremental` watermark
         // file per node id, so three different children driven by ctl.foreach
