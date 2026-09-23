@@ -765,6 +765,11 @@ mod tests {
                 keys.contains("returnsRows"),
                 "{id} reads returnsRows and no field offers it"
             );
+            // The other direction of the same handoff, so it gets the same guard.
+            assert!(
+                keys.contains("passesRows"),
+                "{id} reads passesRows and no field offers it"
+            );
             assert!(
                 !keys.contains("waitForCompletion"),
                 "{id} still offers waitForCompletion, which nothing reads"

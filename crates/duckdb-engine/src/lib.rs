@@ -2013,7 +2013,7 @@ impl DuckdbEngine {
                 // isn't composed into the parent (the side-effect /
                 // trigger model). Full block-scope composition needs
                 // the DAG-engine refactor noted in the README.
-                if let Some(RuntimeSpec::RunJob { path, vars }) = stage.runtime.as_ref() {
+                if let Some(RuntimeSpec::RunJob { path, vars, passes_rows }) = stage.runtime.as_ref() {
                     // What the run has worked out so far goes first, and what the call
                     // names goes over it: naming a value on the call is how a parent
                     // says "run the child with this one", so it has to win.
@@ -2022,11 +2022,32 @@ impl DuckdbEngine {
                         false => Default::default(),
                     };
                     subs.extend(vars.iter().cloned());
-                    let res = if subs.is_empty() {
-                        self.run_subpipeline(path)
-                    } else {
-                        self.run_subpipeline_with_subs(path, &subs)
+                    // passesRows: snapshot the upstream the way ctl.parallelize does,
+                    // hand it over as ${DUCKLE_INPUT}, and remove it once the child is
+                    // done. Set last so a context variable of the same name cannot
+                    // point the child at some other file.
+                    let input = passes_rows.then(|| {
+                        unique_rest_tmp_path(&stage.node_id).with_extension("parquet")
+                    });
+                    let res = match &input {
+                        Some(file) => {
+                            let from = stage.from.clone().unwrap_or_else(|| stage.node_id.clone());
+                            let file_sql = file.display().to_string().replace('\\', "/");
+                            let copy = format!(
+                                "COPY (SELECT * FROM {}) TO '{}' (FORMAT PARQUET)",
+                                plan::quote_ident(&from),
+                                file_sql.replace('\'', "''")
+                            );
+                            subs.insert("DUCKLE_INPUT".to_string(), file_sql);
+                            self.run(Some(&db_path), &copy, false)
+                                .and_then(|_| self.run_subpipeline_with_subs(path, &subs))
+                        }
+                        None if subs.is_empty() => self.run_subpipeline(path),
+                        None => self.run_subpipeline_with_subs(path, &subs),
                     };
+                    if let Some(file) = &input {
+                        let _ = std::fs::remove_file(file);
+                    }
                     if let Err(e) = res {
                         result = Err(EngineError::Query(format!("ctl.runjob({}): {}", path, e)));
                         continue;

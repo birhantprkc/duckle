@@ -101,12 +101,12 @@ COMPONENTS = {
     'ctl.runjob': {
         'kind': 'control',
         'summary': 'Calls a child pipeline (job) as a side effect, passing parent context variables that are substituted as ${VAR} into the child before it runs. Chain several Run Job nodes to build a Master Job that orchestrates child jobs in sequence. The child runs in its own temp DB; its output is not composed b...',
-        'params': ['pipelineRef', 'returnsRows', 'contextVariables'],
+        'params': ['pipelineRef', 'returnsRows', 'passesRows', 'contextVariables'],
     },
     'ctl.runpipeline': {
         'kind': 'control',
         'summary': 'Reads + executes another pipeline file inline as a side effect, then passes the upstream view through unchanged. Useful for triggering helper pipelines (refresh dimension tables, kick off cleanup) without composing their output into the parent.',
-        'params': ['pipelineRef', 'returnsRows', 'parameters'],
+        'params': ['pipelineRef', 'returnsRows', 'passesRows', 'parameters'],
     },
     'ctl.setvar': {
         'kind': 'control',
@@ -126,7 +126,7 @@ COMPONENTS = {
     'ctl.trigger': {
         'kind': 'control',
         'summary': 'Alias of ctl.runpipeline; same executor branch.',
-        'params': ['pipelineRef', 'returnsRows', 'parameters'],
+        'params': ['pipelineRef', 'returnsRows', 'passesRows', 'parameters'],
     },
     'ctl.try': {
         'kind': 'control',

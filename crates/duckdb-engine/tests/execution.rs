@@ -13974,6 +13974,69 @@ fn a_returned_row_path_reaches_a_grandchild() {
     );
 }
 
+/// A child job can take the parent's rows in and give rows back: a reusable block.
+///
+/// returnsRows let a child hand rows back, but nothing let a parent hand rows IN, so
+/// logic shared between pipelines had to be copied into each one. With passesRows the
+/// parent writes its input to a handoff file, the child reads it as ${DUCKLE_INPUT},
+/// and with returnsRows as well the child is a transform the parent calls.
+#[test]
+fn a_child_job_takes_the_parents_rows_and_gives_rows_back() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n2\n3\n");
+    let child = json!({
+        "nodes": [
+            node("ci", "src.parquet", json!({ "path": "${DUCKLE_INPUT}" })),
+            node("cf", "xf.filter", json!({ "predicate": "id > 1" })),
+            node("co", "snk.parquet", json!({ "path": "${DUCKLE_RETURN}", "mode": "overwrite" })),
+        ],
+        "edges": [ main_edge("c1", "ci", "cf"), main_edge("c2", "cf", "co") ]
+    });
+    let child_path = write_file(tmp.path(), "block.json", &serde_json::to_string(&child).unwrap());
+    let out = out_path(tmp.path(), "block_out.csv");
+    let parent = doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("rj", "ctl.runjob", json!({
+                "pipelineRef": child_path, "passesRows": true, "returnsRows": true
+            })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "rj"), main_edge("e2", "rj", "k")]),
+    );
+    let result = engine.execute_pipeline(&parent);
+    assert_eq!(result.status, "ok", "run failed: {:?}", result.error);
+    assert_eq!(
+        count(&format!("read_csv_auto('{}')", out)),
+        2,
+        "the child should have filtered the parent's three rows down to two"
+    );
+}
+
+/// passesRows with nothing connected upstream is refused, and says why.
+///
+/// Otherwise the child would read ${DUCKLE_INPUT} as a literal path and fail with a
+/// missing-file error that points at the child rather than at the call.
+#[test]
+fn passing_rows_needs_an_input() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let child = json!({
+        "nodes": [ node("ci", "src.parquet", json!({ "path": "${DUCKLE_INPUT}" })) ],
+        "edges": []
+    });
+    let child_path = write_file(tmp.path(), "block.json", &serde_json::to_string(&child).unwrap());
+    let parent = doc(
+        json!([node("rj", "ctl.runjob", json!({ "pipelineRef": child_path, "passesRows": true }))]),
+        json!([]),
+    );
+    let result = engine.execute_pipeline(&parent);
+    assert_ne!(result.status, "ok");
+    let error = result.error.unwrap_or_default();
+    assert!(error.contains("passesRows"), "the refusal should name the setting: {error}");
+}
+
 /// A child job whose node holds only a `connectionRef` gets its saved connection.
 ///
 /// Every surface resolves refs on the document it was handed, and a child is not

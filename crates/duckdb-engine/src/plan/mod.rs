@@ -338,6 +338,9 @@ pub enum RuntimeSpec {
     RunJob {
         path: String,
         vars: Vec<(String, String)>,
+        /// Hand the stage's upstream rows to the child as ${DUCKLE_INPUT}. The
+        /// executor snapshots `from` to a parquet file just before the child runs.
+        passes_rows: bool,
     },
     InstallFallback(String),
     Iterate { path: String, count: u64 },
@@ -1919,7 +1922,7 @@ fn build_stage(
     let mut text_search: Option<TextSearchSpec> = None;
     let mut webhook: Option<WebhookSpec> = None;
     let mut remote_exec: Option<RemoteExecSpec> = None;
-    let mut run_job: Option<(String, Vec<(String, String)>)> = None;
+    let mut run_job: Option<(String, Vec<(String, String)>, bool)> = None;
     let mut install_fallback_path: Option<String> = None;
     let mut iterate_pipeline_path: Option<String> = None;
     let mut iterate_count: Option<u64> = None;
@@ -3948,7 +3951,21 @@ fn build_stage(
         if let Some(file) = &handoff {
             vars.push(("DUCKLE_RETURN".to_string(), file.clone()));
         }
-        run_job = Some((path, vars));
+        // The other direction: the parent hands its input rows to the child as
+        // ${DUCKLE_INPUT}, so one child can be a block several pipelines call.
+        // The file is written by the executor just before the child runs, from
+        // the upstream named in `from`, which is why nothing is named here.
+        let passes_rows = props
+            .get("passesRows")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if passes_rows && inputs.main().is_none() {
+            return Err(EngineError::Config(format!(
+                "{}: passesRows is on but nothing is connected upstream, so there are no rows to pass - connect an input or turn passesRows off",
+                component_id
+            )));
+        }
+        run_job = Some((path, vars, passes_rows));
         let sql = match (&handoff, inputs.main()) {
             (Some(file), _) => format!(
                 "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
@@ -3958,7 +3975,8 @@ fn build_stage(
             (None, Some(from_view)) => passthrough_view_sql(&node.id, from_view),
             (None, None) => passthrough_placeholder_sql(&node.id, "triggered"),
         };
-        (sql, StageKind::View, None)
+        let from = inputs.main().filter(|_| passes_rows).map(str::to_string);
+        (sql, StageKind::View, from)
     } else if component_id == "ctl.parallelize" {
         // The branch sub-pipelines + concurrency are attached by compile() as
         // RuntimeSpec::Parallelize. Here we just set `from` so the executor
@@ -6896,7 +6914,7 @@ fn build_stage(
     let runtime: Option<RuntimeSpec> = None
         .or_else(|| upsert.map(RuntimeSpec::Upsert))
         .or_else(|| text_search.map(RuntimeSpec::TextSearch))
-        .or_else(|| run_job.map(|(path, vars)| RuntimeSpec::RunJob { path, vars }))
+        .or_else(|| run_job.map(|(path, vars, passes_rows)| RuntimeSpec::RunJob { path, vars, passes_rows }))
         .or_else(|| install_fallback_path.map(RuntimeSpec::InstallFallback))
         .or_else(|| iterate_pipeline_path
             .map(|path| RuntimeSpec::Iterate { path, count: iterate_count.unwrap_or(0) }))

@@ -314,7 +314,7 @@ fn replace_delimited(haystack: &str, needle: &str, placeholder: &str) -> String 
 /// complete + self-documenting instead of emitting a bare empty stage.
 pub(crate) fn procedural_note(s: &plan::Stage) -> String {
     let cid = s.component_id.as_str();
-    let body = if let Some(RuntimeSpec::RunJob { path, vars }) = s.runtime.as_ref() {
+    let body = if let Some(RuntimeSpec::RunJob { path, vars, .. }) = s.runtime.as_ref() {
         if vars.is_empty() {
             format!("control step: runs sub-pipeline '{}' as a side effect", path)
         } else {

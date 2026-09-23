@@ -3552,7 +3552,7 @@ Database sinks support an optional **dead-letter (validate-before-insert)** step
 | **Checkpoint** | Pass rows through and also write a parquet snapshot to a path |
 | **Dead Letter Queue** | Terminal sink for rejected rows (JSON / CSV / Parquet) |
 | **Run Pipeline** | Inline-execute another pipeline file (`ctl.runpipeline`) |
-| **Run Job** | Call a child pipeline (picked from the workspace) passing parent context variables; chain several to build a Master Job (`ctl.runjob`). The child runs for its side effects: it gets its own temporary database and its output is not composed back into the parent, so a child cannot yet return rows to its caller |
+| **Run Job** | Call a child pipeline (picked from the workspace) passing parent context variables; chain several to build a Master Job (`ctl.runjob`). The child runs in its own temporary database. It can take the caller's input rows (**Pass this node's input rows**, read in the child as `${DUCKLE_INPUT}`, for example by a Parquet source) and hand rows back (**Take the rows the child returns**, written by the child to `${DUCKLE_RETURN}`). With both on, a child is a reusable block that several pipelines call |
 | **Parallelize** | Run the downstream branches wired to its outputs concurrently; branches are unlimited (`ctl.parallelize`) |
 | **Iterate** | Run a sub-pipeline N times with `${ITER_INDEX}` substitution |
 | **For Each** | Run a sub-pipeline once per input row with `${ITER_ITEM_<FIELD>}` substitution; an optional item key column names each run so per-row watermarks stay separate |

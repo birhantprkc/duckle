@@ -7123,6 +7123,15 @@ function synthPipelineControl(comp: ComponentDef): ComponentManifest {
                         description: 'Off, a child runs for its side effects and hands nothing back. On, the parent passes it a handoff file as ${DUCKLE_RETURN} and reads the rows the child writes there. The child always runs to completion either way.',
                     },
                     {
+                        // The other direction of the same handoff. With both on,
+                        // a child is a reusable block: rows in, rows out.
+                        key: 'passesRows',
+                        label: 'Pass this node\'s input rows to the child',
+                        kind: 'bool',
+                        defaultValue: false,
+                        description: 'On, the rows arriving at this node are written to a handoff file the child reads as ${DUCKLE_INPUT} (for example a Parquet source with path ${DUCKLE_INPUT}). Needs an input connected. With "Take the rows the child returns" as well, the child works as a reusable transform.',
+                    },
+                    {
                         key: isJob ? 'contextVariables' : 'parameters',
                         label: isJob ? 'Context variables' : 'Parameters',
                         kind: 'key-value',

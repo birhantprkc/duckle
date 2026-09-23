@@ -40811,6 +40811,13 @@
                 "description": "Off, a child runs for its side effects and hands nothing back. On, the parent passes it a handoff file as ${DUCKLE_RETURN} and reads the rows the child writes there. The child always runs to completion either way."
               },
               {
+                "key": "passesRows",
+                "label": "Pass this node's input rows to the child",
+                "kind": "bool",
+                "defaultValue": false,
+                "description": "On, the rows arriving at this node are written to a handoff file the child reads as ${DUCKLE_INPUT} (for example a Parquet source with path ${DUCKLE_INPUT}). Needs an input connected. With \"Take the rows the child returns\" as well, the child works as a reusable transform."
+              },
+              {
                 "key": "parameters",
                 "label": "Parameters",
                 "kind": "key-value"
@@ -40881,6 +40888,13 @@
                 "kind": "bool",
                 "defaultValue": false,
                 "description": "Off, a child runs for its side effects and hands nothing back. On, the parent passes it a handoff file as ${DUCKLE_RETURN} and reads the rows the child writes there. The child always runs to completion either way."
+              },
+              {
+                "key": "passesRows",
+                "label": "Pass this node's input rows to the child",
+                "kind": "bool",
+                "defaultValue": false,
+                "description": "On, the rows arriving at this node are written to a handoff file the child reads as ${DUCKLE_INPUT} (for example a Parquet source with path ${DUCKLE_INPUT}). Needs an input connected. With \"Take the rows the child returns\" as well, the child works as a reusable transform."
               },
               {
                 "key": "parameters",
@@ -40954,6 +40968,13 @@
                 "kind": "bool",
                 "defaultValue": false,
                 "description": "Off, a child runs for its side effects and hands nothing back. On, the parent passes it a handoff file as ${DUCKLE_RETURN} and reads the rows the child writes there. The child always runs to completion either way."
+              },
+              {
+                "key": "passesRows",
+                "label": "Pass this node's input rows to the child",
+                "kind": "bool",
+                "defaultValue": false,
+                "description": "On, the rows arriving at this node are written to a handoff file the child reads as ${DUCKLE_INPUT} (for example a Parquet source with path ${DUCKLE_INPUT}). Needs an input connected. With \"Take the rows the child returns\" as well, the child works as a reusable transform."
               },
               {
                 "key": "contextVariables",
