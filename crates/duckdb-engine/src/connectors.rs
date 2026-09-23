@@ -16838,6 +16838,286 @@ impl DuckdbEngine {
         ))
     }
 
+    /// src.postgres.cdc: see PgCdcSpec. Peeks the slot, emits the changes into
+    /// the node's table typed as the source declares them, and queues the
+    /// position to save when the run succeeds.
+    pub(crate) fn run_pg_cdc(
+        &self,
+        db: &Path,
+        spec: &plan::PgCdcSpec,
+        pipeline_name: Option<&str>,
+        pending: &mut Vec<crate::PendingWrite>,
+    ) -> Result<String, EngineError> {
+        // Without somewhere to keep the position every run would read from where
+        // the slot stands and nothing would advance it, so PostgreSQL would keep
+        // its WAL forever. Refused rather than run that way.
+        let state_path = incremental_state_path(pipeline_name, &spec.node_id).ok_or_else(|| {
+            EngineError::Config(format!(
+                "src.postgres.cdc: needs a workspace to keep its position in (DUCKLE_WORKSPACE); without one slot '{}' would never advance and PostgreSQL would retain its WAL indefinitely",
+                spec.slot
+            ))
+        })?;
+        let lit = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        let ident = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let query = |inner: &str| -> Result<Vec<JsonValue>, EngineError> {
+            self.run_rows(
+                Some(db),
+                &format!(
+                    "{}SELECT * FROM postgres_query('duckle_src', {});",
+                    spec.attach_read,
+                    lit(inner)
+                ),
+            )
+        };
+        let text = |row: &JsonValue, key: &str| -> Option<String> {
+            match row.get(key)? {
+                JsonValue::Null => None,
+                JsonValue::String(s) => Some(s.clone()),
+                other => Some(other.to_string()),
+            }
+        };
+        let config = |m: String| EngineError::Config(format!("src.postgres.cdc: {m}"));
+        let qualified = format!("{}.{}", ident(&spec.schema), ident(&spec.table));
+
+        // The table's columns in order, with the types it declares.
+        let columns: Vec<(String, String)> = query(&format!(
+            "SELECT a.attname::text AS name, format_type(a.atttypid, a.atttypmod) AS type \
+             FROM pg_attribute a WHERE a.attrelid = to_regclass({}) AND a.attnum > 0 \
+             AND NOT a.attisdropped ORDER BY a.attnum",
+            lit(&qualified)
+        ))?
+        .iter()
+        .filter_map(|r| Some((text(r, "name")?, text(r, "type")?)))
+        .collect();
+        if columns.is_empty() {
+            return Err(config(format!("table {}.{} was not found", spec.schema, spec.table)));
+        }
+        if let Some((name, _)) = columns.iter().find(|(n, _)| PG_CDC_META.contains(&n.as_str())) {
+            return Err(config(format!(
+                "column {name} collides with a column this node adds to every change ({})",
+                PG_CDC_META.join(", ")
+            )));
+        }
+
+        // The publication, then the slot.
+        let has_publication = !query(&format!(
+            "SELECT 1 AS x FROM pg_publication WHERE pubname = {}",
+            lit(&spec.publication)
+        ))?
+        .is_empty();
+        let create_publication = format!(
+            "CREATE PUBLICATION {} FOR TABLE {} WITH (publish = 'insert, update, delete')",
+            ident(&spec.publication),
+            qualified
+        );
+        if !has_publication {
+            if !spec.create_if_missing {
+                return Err(config(format!(
+                    "publication {} does not exist - create it with {}, or turn on createIfMissing",
+                    spec.publication, create_publication
+                )));
+            }
+            // A read-only transaction refuses CREATE PUBLICATION, so this one
+            // statement goes through a writable attach. TRUNCATE is left out: it
+            // is not a row change, and the decoder refuses it.
+            self.run(
+                Some(db),
+                &format!(
+                    "{}CALL postgres_execute('duckle_dst', {});",
+                    spec.attach_write,
+                    lit(&create_publication)
+                ),
+                false,
+            )?;
+        }
+        let created_slot = match query(&format!(
+            "SELECT plugin::text AS plugin FROM pg_replication_slots WHERE slot_name = {}",
+            lit(&spec.slot)
+        ))?
+        .first()
+        {
+            Some(row) => {
+                let plugin = text(row, "plugin").unwrap_or_default();
+                if plugin != "pgoutput" {
+                    return Err(config(format!(
+                        "slot {} decodes with '{plugin}' and this node reads pgoutput - give it a slot of its own",
+                        spec.slot
+                    )));
+                }
+                false
+            }
+            None => {
+                if !spec.create_if_missing {
+                    return Err(config(format!(
+                        "slot {} does not exist - create it with SELECT pg_create_logical_replication_slot('{}', 'pgoutput'), or turn on createIfMissing",
+                        spec.slot, spec.slot
+                    )));
+                }
+                // A statement of its own: PostgreSQL will not create a slot in a
+                // transaction that has written anything.
+                query(&format!(
+                    "SELECT slot_name::text AS slot FROM pg_create_logical_replication_slot({}, 'pgoutput')",
+                    lit(&spec.slot)
+                ))?;
+                true
+            }
+        };
+
+        // Advance to what the last successful run delivered. Forward only:
+        // PostgreSQL refuses to move a slot back, and a slot already past the
+        // saved position was advanced by someone else, which was theirs to do.
+        let prior = crate::read_state_snapshot(&state_path);
+        let saved = prior
+            .as_deref()
+            .and_then(|t| serde_json::from_str::<JsonValue>(t).ok())
+            .filter(|v| v.get("slot").and_then(|s| s.as_str()) == Some(spec.slot.as_str()))
+            .and_then(|v| v.get("lsn").and_then(|l| l.as_str()).map(str::to_string));
+        if let Some(lsn) = &saved {
+            if lsn.is_empty() || !lsn.chars().all(|c| c.is_ascii_hexdigit() || c == '/') {
+                return Err(config(format!("the saved position '{lsn}' is not an LSN")));
+            }
+            let behind = query(&format!(
+                "SELECT (confirmed_flush_lsn < {}::pg_lsn) AS behind FROM pg_replication_slots WHERE slot_name = {}",
+                lit(lsn),
+                lit(&spec.slot)
+            ))?;
+            if behind.first().and_then(|r| r.get("behind")).and_then(|b| b.as_bool()) == Some(true) {
+                query(&format!(
+                    "SELECT end_lsn::text AS lsn FROM pg_replication_slot_advance({}, {}::pg_lsn)",
+                    lit(&spec.slot),
+                    lit(lsn)
+                ))?;
+            }
+        }
+
+        // How much WAL the slot holds back, measured after it has advanced.
+        let lag_bytes = query(&format!(
+            "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint AS lag \
+             FROM pg_replication_slots WHERE slot_name = {}",
+            lit(&spec.slot)
+        ))?
+        .first()
+        .and_then(|r| r.get("lag").cloned())
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .unwrap_or(0)
+        .max(0) as u64;
+
+        // Peek: reading consumes nothing.
+        let messages = query(&format!(
+            "SELECT lsn::text AS lsn, encode(data, 'hex') AS data \
+             FROM pg_logical_slot_peek_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
+            lit(&spec.slot),
+            spec.batch_size,
+            lit(&spec.publication)
+        ))?;
+        let mut decoder = crate::pgoutput::Decoder::default();
+        let mut last_commit: Option<String> = None;
+        let mut rows: Vec<String> = Vec::new();
+        let mut elsewhere = 0usize;
+        for m in &messages {
+            let lsn = text(m, "lsn").unwrap_or_default();
+            let bytes = decode_hex(&text(m, "data").unwrap_or_default())
+                .map_err(|e| EngineError::Query(format!("src.postgres.cdc: {e}")))?;
+            if bytes.first() == Some(&b'C') {
+                last_commit = Some(lsn);
+            }
+            let Some(change) = decoder
+                .decode(&bytes)
+                .map_err(|e| EngineError::Query(format!("src.postgres.cdc: {e}")))?
+            else {
+                continue;
+            };
+            let Some(rel) = decoder.relation(change.relation_oid) else {
+                continue;
+            };
+            if rel.namespace != spec.schema || rel.name != spec.table {
+                elsewhere += 1;
+                continue;
+            }
+            let mut row = serde_json::Map::new();
+            row.insert("_op".into(), JsonValue::from(change.op.as_str()));
+            row.insert("_lsn".into(), JsonValue::from(crate::pgoutput::format_lsn(change.commit_lsn)));
+            row.insert("_xid".into(), JsonValue::from(change.xid.to_string()));
+            row.insert("_commit_ts".into(), JsonValue::from(pg_epoch_micros_to_text(change.commit_ts_micros)));
+            for (col, value) in rel.columns.iter().zip(change.values) {
+                row.insert(col.name.clone(), value.map(JsonValue::from).unwrap_or(JsonValue::Null));
+            }
+            rows.push(JsonValue::Object(row).to_string());
+        }
+
+        // Materialize, typed as the table declares. Every value arrives as
+        // text, so each column is read as VARCHAR and cast once, in one place.
+        let mut raw_cols: Vec<String> = PG_CDC_META.iter().map(|m| m.to_string()).collect();
+        raw_cols.extend(columns.iter().map(|(n, _)| n.clone()));
+        let mut select = vec![
+            "_op".to_string(),
+            "_lsn".to_string(),
+            "CAST(_xid AS BIGINT) AS _xid".to_string(),
+            "CAST(_commit_ts AS TIMESTAMPTZ) AS _commit_ts".to_string(),
+        ];
+        for (name, pg_type) in &columns {
+            let q = plan::quote_ident(name);
+            select.push(format!("{} AS {}", pg_text_cast(&q, pg_type), q));
+        }
+        let node_q = plan::quote_ident(&spec.node_id);
+        let ndjson = crate::unique_rest_tmp_path(&spec.node_id).with_extension("ndjson");
+        let from = if rows.is_empty() {
+            let nulls: Vec<String> = raw_cols
+                .iter()
+                .map(|c| format!("NULL::VARCHAR AS {}", plan::quote_ident(c)))
+                .collect();
+            format!("(SELECT {}) WHERE false", nulls.join(", "))
+        } else {
+            std::fs::write(&ndjson, rows.join("\n"))
+                .map_err(|e| EngineError::Query(format!("src.postgres.cdc: write changes: {e}")))?;
+            let types: Vec<String> = raw_cols
+                .iter()
+                .map(|c| format!("'{}': 'VARCHAR'", c.replace('\'', "''")))
+                .collect();
+            format!(
+                "read_json('{}', format='newline_delimited', columns={{{}}})",
+                ndjson.display().to_string().replace('\\', "/").replace('\'', "''"),
+                types.join(", ")
+            )
+        };
+        let materialized = self.run(
+            Some(db),
+            &format!("CREATE OR REPLACE TABLE {node_q} AS SELECT {} FROM {from};", select.join(", ")),
+            false,
+        );
+        let _ = std::fs::remove_file(&ndjson);
+        materialized?;
+
+        if let Some(lsn) = &last_commit {
+            pending.push(crate::PendingWrite::state(
+                state_path,
+                serde_json::json!({ "slot": spec.slot, "lsn": lsn }),
+                prior,
+            ));
+        }
+
+        let mut note = format!(
+            "postgres-cdc: {} change(s) from slot {}{}; the slot holds {:.1} MB of WAL",
+            rows.len(),
+            spec.slot,
+            if created_slot { " (created now, so it captures changes from this moment on)" } else { "" },
+            lag_bytes as f64 / (1024.0 * 1024.0)
+        );
+        if elsewhere > 0 {
+            note.push_str(&format!(
+                "; {elsewhere} change(s) to other tables in publication {} were passed over",
+                spec.publication
+            ));
+        }
+        if lag_bytes > spec.max_lag_mb.saturating_mul(1024 * 1024) {
+            note.push_str(&format!(
+                " - past maxLagMb ({}): PostgreSQL keeps WAL until this slot is consumed, so run the pipeline more often, raise the limit, or drop the slot with SELECT pg_drop_replication_slot('{}') if nothing uses it any more",
+                spec.max_lag_mb, spec.slot
+            ));
+        }
+        Ok(note)
+    }
+
     /// Best-effort type of a column from a sample non-null row, e.g.
     /// "BIGINT" / "TIMESTAMP". None when the upstream has no rows to probe.
     fn probe_column_type(&self, db: &Path, up_q: &str, col_q: &str) -> Option<String> {
@@ -18934,6 +19214,75 @@ fn read_kafka_offset_state(path: &std::path::Path, topic: &str, partition: i32) 
 
 /// Read a saved DuckLake snapshot id from CDC state. Missing / unreadable
 /// reads as "no prior snapshot".
+/// The columns src.postgres.cdc puts before a change's own values.
+const PG_CDC_META: &[&str] = &["_op", "_lsn", "_xid", "_commit_ts"];
+
+/// Bytes from the hex `encode(data, 'hex')` returns.
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err(format!("odd-length hex ({} chars)", s.len()));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            s.get(i..i + 2)
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(|| format!("not hex at {i}"))
+        })
+        .collect()
+}
+
+/// A pgoutput commit time - microseconds since 2000-01-01 UTC, PostgreSQL's
+/// epoch - as text DuckDB reads straight into a TIMESTAMPTZ.
+fn pg_epoch_micros_to_text(micros: i64) -> String {
+    let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .expect("2000-01-01 is a date");
+    (epoch + chrono::Duration::microseconds(micros))
+        .format("%Y-%m-%d %H:%M:%S%.6f+00")
+        .to_string()
+}
+
+/// The DuckDB expression that turns a pgoutput text value into the type the
+/// source column declares (`format_type` output). Anything without an exact
+/// DuckDB equivalent stays as PostgreSQL's own text: an unconstrained numeric
+/// has no scale to cast to, and narrowing it to a double would change it.
+fn pg_text_cast(col: &str, pg_type: &str) -> String {
+    let t = pg_type.trim().to_ascii_lowercase();
+    let cast = |ty: &str| format!("CAST({col} AS {ty})");
+    if t.ends_with("[]") {
+        return col.to_string();
+    }
+    match t.as_str() {
+        "smallint" => cast("SMALLINT"),
+        "integer" => cast("INTEGER"),
+        "bigint" => cast("BIGINT"),
+        "real" => cast("FLOAT"),
+        "double precision" => cast("DOUBLE"),
+        "boolean" => cast("BOOLEAN"),
+        "date" => cast("DATE"),
+        "uuid" => cast("UUID"),
+        "json" | "jsonb" => cast("JSON"),
+        // PostgreSQL's text form of bytea is `\x` followed by hex.
+        "bytea" => format!("from_hex(substr({col}, 3))"),
+        _ if t.starts_with("timestamp") && t.ends_with("with time zone") && !t.contains("without") => {
+            cast("TIMESTAMPTZ")
+        }
+        _ if t.starts_with("timestamp") => cast("TIMESTAMP"),
+        _ if t.starts_with("time") && t.contains("without time zone") => cast("TIME"),
+        _ if t.starts_with("numeric(") => {
+            let inner = t.trim_start_matches("numeric(").trim_end_matches(')');
+            let mut parts = inner.split(',').map(|p| p.trim().parse::<u32>());
+            match (parts.next(), parts.next()) {
+                (Some(Ok(p)), Some(Ok(s))) if p <= 38 => cast(&format!("DECIMAL({p},{s})")),
+                (Some(Ok(p)), None) if p <= 38 => cast(&format!("DECIMAL({p},0)")),
+                _ => col.to_string(),
+            }
+        }
+        _ => col.to_string(),
+    }
+}
+
 fn read_snapshot_state(path: &std::path::PathBuf) -> Option<u64> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: JsonValue = serde_json::from_str(&text).ok()?;

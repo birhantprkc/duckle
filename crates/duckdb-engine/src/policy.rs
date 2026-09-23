@@ -256,7 +256,7 @@ pub fn load(workspace: Option<&Path>) -> Result<Policy, EngineError> {
 /// Recorded so `no_component_writes_state_without_the_policy_knowing` can tell
 /// when a ninth appears. The number is a fact about connectors.rs, not a limit.
 #[cfg(test)]
-const STATE_WRITE_SITES: usize = 8;
+const STATE_WRITE_SITES: usize = 9;
 
 /// Every component that advances saved state when it runs.
 ///
@@ -281,6 +281,8 @@ pub fn advances_saved_state(component_id: &str) -> bool {
             // was refused.
             | "src.ducklake.changes"
             | "xf.ducklake.cdc"
+            // replication slot position (LSN) delivered by a successful run
+            | "src.postgres.cdc"
             // uri -> fingerprint map of what has been seen
             | "src.changed"
             // topic/partition resume offsets

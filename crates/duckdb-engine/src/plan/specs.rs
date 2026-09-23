@@ -55,6 +55,36 @@ pub struct DuckLakeCdcSpec {
     pub inserts_only: bool,
 }
 
+/// src.postgres.cdc: log-based change data capture from PostgreSQL, through
+/// the built-in `pgoutput` plugin read over SQL - no JVM, no Kafka, nothing to
+/// install on the server.
+///
+/// Changes are PEEKED, never consumed by the read. The last commit delivered is
+/// saved to workspace state only when the whole run succeeds, and the slot is
+/// advanced to that saved position at the start of the next run. A failed run
+/// therefore re-delivers instead of losing, and the slot only releases WAL for
+/// changes a successful run has already handed on.
+#[derive(Debug, Clone)]
+pub struct PgCdcSpec {
+    pub node_id: String,
+    /// `LOAD postgres; ATTACH ... AS duckle_src (TYPE POSTGRES, READ_ONLY);`
+    pub attach_read: String,
+    /// The same server attached writable as `duckle_dst`, used only to create
+    /// a missing publication: a read-only transaction refuses CREATE PUBLICATION.
+    pub attach_write: String,
+    pub schema: String,
+    pub table: String,
+    pub slot: String,
+    pub publication: String,
+    /// Create the publication and slot when they do not exist yet.
+    pub create_if_missing: bool,
+    /// Changes read per run. Decoding stops at a transaction boundary past it,
+    /// so a transaction is never split across runs.
+    pub batch_size: u64,
+    /// Warn when the slot holds back more WAL than this.
+    pub max_lag_mb: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TextSearchSpec {
     pub from_view: String,

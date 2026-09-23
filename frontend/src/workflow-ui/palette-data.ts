@@ -140,6 +140,7 @@ export const PALETTE: Category[] = [
                 label: 'Databases',
                 components: [
                     src('postgres', 'PostgreSQL', 'available', 'Read from PostgreSQL via the DuckDB postgres extension'),
+                    src('postgres.cdc', 'PostgreSQL CDC', 'available', 'Log-based change data capture: every insert, update and delete from a table, in commit order, read from a replication slot through the built-in pgoutput plugin. No JVM, no Kafka, nothing to install on the server. The position is saved only when the run succeeds, so a failed run re-delivers instead of losing changes.'),
                     src('mysql', 'MySQL', 'available', 'Read from MySQL via the DuckDB mysql extension'),
                     src('mariadb', 'MariaDB', 'available', 'Read from MariaDB via the DuckDB mysql extension'),
                     src('sqlserver', 'SQL Server', 'available', 'Read SQL Server via the native TDS protocol (tiberius, pure Rust). SQL auth (user/password); trust_cert option for self-signed dev servers.'),

@@ -342,6 +342,26 @@ jobs:
           DUCKLE_PG_USER: postgres
           DUCKLE_PG_PASS: pgtest
         run: cargo test -p duckle-duckdb-engine --test execution -- pg_
+      # Logical decoding needs wal_level=logical, which a service container
+      # cannot be started with, so it is set and the container restarted. The
+      # final check fails the step if the setting did not take, rather than
+      # letting the CDC tests fail for a reason that is not theirs.
+      - name: Enable logical decoding for the CDC tests
+        run: |
+          set -e
+          id=${{ job.services.postgres.id }}
+          docker exec "$id" psql -U postgres -c "ALTER SYSTEM SET wal_level = logical"
+          docker restart "$id"
+          for i in $(seq 1 30); do docker exec "$id" pg_isready -U postgres && break; sleep 2; done
+          docker exec "$id" psql -U postgres -tAc "SHOW wal_level" | grep -qx logical
+      - name: Run PostgreSQL CDC tests
+        env:
+          DUCKLE_PG_HOST: localhost
+          DUCKLE_PG_PORT: '5432'
+          DUCKLE_PG_DB: postgres
+          DUCKLE_PG_USER: postgres
+          DUCKLE_PG_PASS: pgtest
+        run: cargo test -p duckle-duckdb-engine --test postgres_cdc
 
   # Live MySQL integration tests (also covers MariaDB, same wire).
   mysql-integration:

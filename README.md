@@ -1969,6 +1969,43 @@ the plan says so on every line. And only runs started by `duckle-runner
 --pipeline` write a receipt today, so a run from the API, the scheduler or the
 desktop app answers `retry:no-receipt` rather than guessing.
 
+### PostgreSQL change data capture (`src.postgres.cdc`)
+
+Every insert, update and delete from one table, in commit order, read from a
+replication slot through PostgreSQL's built-in `pgoutput` plugin. There is no
+JVM, no Kafka and nothing to install on the server: `pgoutput` ships with
+PostgreSQL 10 and later and with every managed service.
+
+Each change is one row: `_op` (`insert` / `update` / `delete`), `_lsn` (the
+transaction's commit LSN), `_xid`, `_commit_ts`, then the row itself, typed as
+the table declares it. A delete carries the replica identity (the key, or the
+whole old row under `REPLICA IDENTITY FULL`). Wire it into a Merge / Upsert sink
+with delete propagation to keep a copy in step.
+
+**Nothing is lost when a run fails.** Changes are peeked, never consumed by the
+read. The last commit delivered is saved only when the whole run succeeds, and
+the slot is advanced to it at the start of the next run, so a run that fails
+after reading hands the same changes to the next one.
+
+**What the server needs.** `wal_level = logical`, and a role allowed to create
+publications and replication slots (or create them yourself and turn off
+*Create the publication and slot if missing*). A new slot captures changes from
+the moment it is made, so load the existing rows once with the PostgreSQL
+source first.
+
+**A slot keeps WAL until it is consumed.** The node reports how much on every
+run and warns past *maxLagMb*. A pipeline that stops running leaves its slot
+holding WAL until the server's disk fills, so drop a slot nothing reads any
+more with `SELECT pg_drop_replication_slot('name')`, and consider
+`max_slot_wal_keep_size` on the server as a hard cap.
+
+**Large values on updates.** PostgreSQL does not resend a large value an
+UPDATE did not touch. Rather than emit it as NULL, which would let a
+downstream upsert erase it, the node takes it from the old row image, and
+without one it stops with an error asking for `REPLICA IDENTITY FULL` on the
+table. Changes recorded before that setting still lack the value, so reload
+the table and recreate the slot in that case.
+
 ### Backfill without the desktop app (`backfill`)
 
 Production deployments are headless, so replaying from an earlier point should
@@ -1981,11 +2018,13 @@ duckle-runner backfill clear --pipeline ./pipelines/daily.json --node inc
 duckle-runner backfill list  --pipeline ./pipelines/daily.json --json      # for CI and agents
 ```
 
-**Five node kinds keep state in that folder, and only two resume from a value a
+**Six node kinds keep state in that folder, and only two resume from a value a
 person can write down.** `xf.incremental` (a watermark) and
 `src.ducklake.changes` (a snapshot id) can be set; a `src.kafka` resume offset,
-a `src.spool` byte position and an `xf.tumble` buffer pointer are listed and can
-be cleared, but `set` on them is **refused**. Writing `{value,type}` over a
+a `src.spool` byte position, an `xf.tumble` buffer pointer and a
+`src.postgres.cdc` slot position are listed and can be cleared, but `set` on
+them is **refused**. A replication slot cannot be moved back, and moving one
+forward by hand would skip changes nobody received. Writing `{value,type}` over a
 tumbling window's state would drop the pointer to the rows it is holding and
 delete them on the next run, with nothing to report it.
 
@@ -2735,7 +2774,7 @@ also holds where it is actually exercised:
 | rule | also enforced at |
 |---|---|
 | `network.allowedDomains` | every connection, every redirect hop, and DuckDB itself |
-| `state.allowMutation` | every component that advances saved state - incremental watermarks, DuckLake CDC snapshots, Kafka offsets, the `src.changed` seen-map, spool and REST positions, tumble windows and stored baselines - so `duckle-runner backfill`, the API, MCP and the panel all meet the same refusal |
+| `state.allowMutation` | every component that advances saved state - incremental watermarks, DuckLake CDC snapshots, PostgreSQL CDC slot positions, Kafka offsets, the `src.changed` seen-map, spool and REST positions, tumble windows and stored baselines - so `duckle-runner backfill`, the API, MCP and the panel all meet the same refusal |
 | `extensions.allowUnsigned` | the DuckDB launch, which can withhold `-unsigned` but never grant it |
 
 DuckDB is the reason that last one names two enforcers. Duckle's own HTTP
@@ -3397,7 +3436,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 
 ### Sources
 
-**121 sources available today.**
+**122 sources available today.**
 
 | Group | Connectors | Status |
 |---|---|---|
@@ -3409,6 +3448,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 | **Lakehouse table formats** | Apache Iceberg, Delta Lake, DuckLake (catalog in a local file or a `postgres:` / `mysql:` / `sqlite:` DSN, with the catalog schema and `META_*` parameters - including `META_SECRET` - settable on the node) | Available |
 | **Embedded databases** | SQLite (read tables), DuckDB (read tables or run a query) | Available |
 | **Network relational DBs** | PostgreSQL, MySQL, MariaDB, CockroachDB | Available (live CI for PG + MySQL) |
+| **Change data capture** | PostgreSQL log-based CDC (`src.postgres.cdc`): inserts, updates and deletes from a replication slot through the built-in `pgoutput` plugin, no JVM or Kafka; the position is saved only on a successful run, and the slot's WAL retention is reported on every run | Available |
 | **Network relational DBs** | SQL Server (TDS), Oracle (Instant Client at runtime), ClickHouse (HTTP API), **IBM DB2** (IBM Data Server ODBC driver), **Turso / libSQL** (HTTP pipeline API - no driver install; `libsql://` URLs accepted) | Available |
 | **Network relational DBs** | generic JDBC | Planned |
 | **Object storage** | Amazon S3, Google Cloud Storage, Azure Blob, HTTP(S), MinIO, Cloudflare R2, Backblaze B2 | Available (live CI for MinIO) |

@@ -316,8 +316,8 @@ COMPONENTS = {
     'snk.chroma': {
         'kind': 'sink',
         'summary': '',
-        'params': ['endpoint', 'apiKey', 'collection', 'connectionRef', 'embeddingColumn', 'idColumn', 'dimension', 'metric', 'mode', 'batchSize'],
-        'unverified': ['metadataColumns', 'createIfMissing'],
+        'params': ['endpoint', 'apiKey', 'collection', 'connectionRef', 'embeddingColumn', 'idColumn', 'dimension', 'metric', 'mode', 'batchSize', 'createIfMissing'],
+        'unverified': ['metadataColumns'],
     },
     'snk.clickhouse': {
         'kind': 'sink',
@@ -1050,6 +1050,11 @@ COMPONENTS = {
         'kind': 'source',
         'summary': 'Read from PostgreSQL via the DuckDB postgres extension',
         'params': ['connectionRef', 'host', 'port', 'database', 'username', 'password', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'connectTimeout', 'options', 'connParams', 'mode', 'schemaName', 'tableName', 'sql', 'pushdown', 'readOnly', 'connString'],
+    },
+    'src.postgres.cdc': {
+        'kind': 'source',
+        'summary': 'Log-based change data capture: every insert, update and delete from a table, in commit order, read from a replication slot through the built-in pgoutput plugin. No JVM, no Kafka, nothing to install on the server. The position is saved only when the run succeeds, so a failed run re-delivers instea...',
+        'params': ['connectionRef', 'host', 'port', 'database', 'username', 'password', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'connectTimeout', 'options', 'connParams', 'table', 'slotName', 'publication', 'createIfMissing', 'connString', 'batchSize', 'maxLagMb'],
     },
     'src.pubsub': {
         'kind': 'source',

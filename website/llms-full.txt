@@ -13,8 +13,8 @@ catalog the application itself reads, so the names and counts here are exact.
 - Free and open source, dual-licensed MIT OR Apache-2.0. No per-row, per-connector, or per-seat billing.
 - Local-first desktop app: runs fully offline, no account and no telemetry, suitable for air-gapped and compliance-sensitive work.
 - Engine: pipelines compile to SQL and execute on DuckDB, an in-process analytical database, at native speed.
-- 411 components, 394 available today: sources, transforms, destinations, data-quality checks, control-flow nodes, and code runners.
-- 194 connectors (121 sources / 73 destinations): databases, warehouses, lakehouses, object stores, streaming brokers, NoSQL, vector databases, geospatial formats, and SaaS APIs.
+- 412 components, 395 available today: sources, transforms, destinations, data-quality checks, control-flow nodes, and code runners.
+- 195 connectors (122 sources / 73 destinations): databases, warehouses, lakehouses, object stores, streaming brokers, NoSQL, vector databases, geospatial formats, and SaaS APIs.
 - Transformation: 144 transforms including joins, window functions, aggregates, CDC/SCD, incremental loads, upsert with delete propagation, and a visual Map (tMap-style) editor.
 - Data quality: 29 checks, plus 21 control-flow nodes for branching, iteration, parallel branches, and calling child pipelines.
 - Three ways to author the same pipeline: the visual canvas, the Python API (`pip install duckle`), or plain English via the built-in assistant. All three produce the same pipeline JSON and the same SQL.
@@ -81,7 +81,7 @@ Every component, by id. `src.*` reads, `snk.*` writes, `xf.*` transforms,
 `qa.*` checks, `ctl.*` controls flow, `code.*` runs your own code. Entries
 marked [planned] or [preview] are not usable yet.
 
-### Sources (read) (130)
+### Sources (read) (131)
 
 - `src.adbc` ADBC (Arrow): Read any database that ships an ADBC (Arrow Database Connectivity) driver. Point at a prebuilt driver shared library (.dll / .so / .dylib) plus a connection URI and SQL; rows stream back as Arrow for fast loads. Friendly wrappers can map their own fields onto driver / options
 - `src.airtable` Airtable: Airtable REST. Bearer Personal Access Token. Cursor pagination on `offset` (cursorNextPath /offset, cursorParam `offset`). responsePath /records
@@ -167,6 +167,7 @@ marked [planned] or [preview] are not usable yet.
 - `src.pipedrive` Pipedrive: Pipedrive REST. URL ?api_token=... or Bearer auth. Cursor pagination on `additional_data.pagination.next_start` (start parameter). responsePath /data
 - `src.pixeltable` Pixeltable: Read a Pixeltable table (#223), the multimodal AI data store. Exchanges through Parquet: Pixeltable exports the table (or a filtered/limited subset) and Duckle ingests it with read_parquet, so no rows cross one at a time. Supports versioned reads via table:N. Needs a Python with pixeltable installed; the desktop app provisions one on first use
 - `src.postgres` PostgreSQL: Read from PostgreSQL via the DuckDB postgres extension
+- `src.postgres.cdc` PostgreSQL CDC: Log-based change data capture: every insert, update and delete from a table, in commit order, read from a replication slot through the built-in pgoutput plugin. No JVM, no Kafka, nothing to install on the server. The position is saved only when the run succeeds, so a failed run re-delivers instead of losing changes
 - `src.pubsub` GCP Pub/Sub: Pull messages via the Pub/Sub REST API (POST /v1/projects/{p}/subscriptions/{s}:pull) - sidesteps the gRPC build dependency. Auto-acks the batch. Auth via a pre-fetched OAuth2 Bearer access token (mint with `gcloud auth print-access-token`). Emits {message_id, publish_time, data} rows
 - `src.pulsar` Apache Pulsar [planned]: Reads data from Apache Pulsar
 - `src.qdrant` Qdrant: Scroll all points in a Qdrant collection via /collections/{id}/points/scroll. Cursor pagination on `result.next_page_offset`; emits {id, ...payload[, vector]} rows. apiKey via api-key header

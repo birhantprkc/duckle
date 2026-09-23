@@ -406,7 +406,7 @@ const dbConnectionFields = (componentId: string): Field[] => [
 // #161). All of these ATTACH through the DuckDB postgres extension, so the same
 // sslmode / cert / connect_timeout / options params flow through to libpq.
 const PG_ADVANCED_IDS = new Set([
-    'src.postgres', 'snk.postgres',
+    'src.postgres', 'snk.postgres', 'src.postgres.cdc',
     'src.cockroach', 'snk.cockroach',
     'src.redshift', 'snk.redshift',
     'src.pgvector', 'snk.pgvector',
@@ -2119,6 +2119,37 @@ function fileFormatSection(comp: ComponentDef): FormSection[] {
         ];
     }
     return [];
+}
+
+/**
+ * src.postgres.cdc: the PostgreSQL source's own connection section, taken from
+ * it rather than copied, so a saved connection behaves exactly as it does
+ * there. Its SSL section arrives the same way every Postgres node's does, from
+ * PG_ADVANCED_IDS. Then what a change feed needs.
+ */
+function synthPostgresCdc(comp: ComponentDef): ComponentManifest {
+    const pg = synthDbSource({ ...comp, id: 'src.postgres' });
+    const connection = pg.sections.filter(s => s.label === 'Connection');
+    return base(comp, [
+        ...connection,
+        {
+            label: 'Change feed',
+            fields: [
+                { key: 'table', label: 'Table', kind: 'text', required: true, placeholder: 'public.orders', description: 'The table to capture, as schema.table (public when no schema is given). Each change arrives as one row: _op (insert / update / delete), _lsn, _xid and _commit_ts, then the row itself, typed as the table declares it.' },
+                { key: 'slotName', label: 'Replication slot', kind: 'text', required: true, placeholder: 'duckle_orders', description: "One slot per pipeline that reads this table. PostgreSQL keeps WAL until the slot is consumed, so a slot nothing reads any more should be dropped: SELECT pg_drop_replication_slot('name'). Lowercase letters, digits and underscores." },
+                { key: 'publication', label: 'Publication', kind: 'text', placeholder: '<slot>_pub', description: 'Defaults to the slot name with _pub. The one Duckle creates publishes insert, update and delete for this table only.' },
+                { key: 'createIfMissing', label: 'Create the publication and slot if missing', kind: 'bool', defaultValue: true, description: 'Needs a role allowed to create publications and replication slots, and wal_level = logical on the server. A new slot captures changes from the moment it is made: load the existing rows once with the PostgreSQL source.' },
+                { key: 'connString', label: 'Connection string (optional)', kind: 'text', placeholder: 'host=... port=5432 dbname=... user=...', description: 'A libpq key-value string or postgresql:// URL. When set it replaces the host, port and credentials above.' },
+            ],
+        },
+        {
+            label: 'Limits',
+            fields: [
+                { key: 'batchSize', label: 'Changes per run', kind: 'integer', defaultValue: 100000, description: 'Reading stops at the first transaction boundary past this, so a transaction is never split across runs. The rest arrive on the next run.' },
+                { key: 'maxLagMb', label: 'Warn when the slot holds more than (MB)', kind: 'integer', defaultValue: 1024, description: 'How much WAL the slot keeps on the server is reported on every run, with a warning past this. Consider max_slot_wal_keep_size on the server as a hard cap.' },
+            ],
+        },
+    ]);
 }
 
 function synthLakehouseSource(comp: ComponentDef): ComponentManifest {
@@ -9436,6 +9467,9 @@ function dispatchManifest(componentId: string): ComponentManifest | undefined {
         const m = synthWrongFamilyForm(comp);
         if (m) return m;
     }
+    // Sits in the databases group, whose generic synth would give it a query
+    // form; routed by id ahead of the group checks.
+    if (comp.id === 'src.postgres.cdc') return synthPostgresCdc(comp);
     if (comp.id === 'src.model') return synthModelSource(comp);
     if (comp.id === 'snk.model') return synthModelSink(comp);
     if (groupId === 'src.files') return synthFileSource(comp);

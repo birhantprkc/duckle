@@ -73,6 +73,7 @@ pub mod nodeout;
 pub mod occurrences;
 pub mod outcache;
 pub mod params;
+pub mod pgoutput;
 pub mod retry;
 pub mod sla;
 pub mod plans;
@@ -2647,6 +2648,14 @@ impl DuckdbEngine {
                     // DuckLake change-data-feed source: materialize table_changes
                     // since the saved snapshot; persist the new snapshot on success.
                     Some(RuntimeSpec::DuckLakeCdc(spec)) => self.run_ducklake_cdc(
+                        &db_path,
+                        spec,
+                        pipeline_name,
+                        &mut pending_writes,
+                    ),
+                    // PostgreSQL log-based change feed: peek the slot, persist the
+                    // position on success, advance the slot on the next run.
+                    Some(RuntimeSpec::PgCdc(spec)) => self.run_pg_cdc(
                         &db_path,
                         spec,
                         pipeline_name,

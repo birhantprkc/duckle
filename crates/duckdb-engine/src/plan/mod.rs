@@ -377,6 +377,8 @@ pub enum RuntimeSpec {
     Incremental(IncrementalSpec),
     /// src.ducklake.changes: DuckLake change-data-feed source (see DuckLakeCdcSpec).
     DuckLakeCdc(DuckLakeCdcSpec),
+    /// src.postgres.cdc: log-based PostgreSQL change feed (see PgCdcSpec).
+    PgCdc(PgCdcSpec),
     Webhook(WebhookSpec),
     SnowflakeSink(SnowflakeSinkSpec),
     DatabricksSink(DatabricksSinkSpec),
@@ -1936,6 +1938,7 @@ fn build_stage(
     let mut die_spec: Option<(String, String)> = None;
     let mut incremental: Option<IncrementalSpec> = None;
     let mut ducklake_cdc: Option<DuckLakeCdcSpec> = None;
+    let mut pg_cdc: Option<PgCdcSpec> = None;
     let mut snowflake_sink: Option<SnowflakeSinkSpec> = None;
     let mut databricks_sink: Option<DatabricksSinkSpec> = None;
     let mut salesforce_sink: Option<SalesforceSinkSpec> = None;
@@ -4051,6 +4054,75 @@ fn build_stage(
         });
         (
             passthrough_placeholder_sql(&node.id, "ducklake-cdc"),
+            StageKind::View,
+            None,
+        )
+    } else if component_id == "src.postgres.cdc" {
+        // Log-based PostgreSQL change feed. The executor peeks the slot, emits
+        // the changes, and saves the position only on run success; the SQL
+        // here is a placeholder the RuntimeSpec arm replaces.
+        let attach_read = builders::db_attach(&props, "postgres", 5432, true);
+        if attach_read.is_empty() {
+            return Err(EngineError::Config(format!(
+                "{}: a connection is required (host, or a connection string)",
+                component_id
+            )));
+        }
+        let qualified = string_prop(&props, "table")
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| EngineError::Config(format!("{}: table required (schema.table)", component_id)))?;
+        let (schema, table) = match qualified.split_once('.') {
+            Some((s, t)) => (s.trim().to_string(), t.trim().to_string()),
+            None => ("public".to_string(), qualified.clone()),
+        };
+        // A slot outlives the pipeline and holds WAL until it is consumed, so
+        // its name is the user's to choose and see, not something derived: two
+        // pipelines sharing one would each advance it past the other's changes.
+        let slot = string_prop(&props, "slotName")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                EngineError::Config(format!(
+                    "{}: slotName required - one replication slot per consuming pipeline",
+                    component_id
+                ))
+            })?;
+        let pg_name_ok = |n: &str| {
+            !n.is_empty()
+                && n.len() <= 63
+                && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        };
+        if !pg_name_ok(&slot) {
+            return Err(EngineError::Config(format!(
+                "{}: slotName '{}' must be 1-63 lowercase letters, digits or underscores, which is what PostgreSQL accepts for a slot",
+                component_id, slot
+            )));
+        }
+        let publication = string_prop(&props, "publication")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("{slot}_pub"));
+        if !pg_name_ok(&publication) {
+            return Err(EngineError::Config(format!(
+                "{}: publication '{}' must be 1-63 lowercase letters, digits or underscores",
+                component_id, publication
+            )));
+        }
+        pg_cdc = Some(PgCdcSpec {
+            node_id: node.id.clone(),
+            attach_write: builders::db_attach(&props, "postgres", 5432, false),
+            attach_read,
+            schema,
+            table,
+            slot,
+            publication,
+            create_if_missing: props.get("createIfMissing").and_then(|v| v.as_bool()).unwrap_or(true),
+            batch_size: props.get("batchSize").and_then(|v| v.as_u64()).filter(|n| *n > 0).unwrap_or(100_000),
+            max_lag_mb: props.get("maxLagMb").and_then(|v| v.as_u64()).unwrap_or(1024),
+        });
+        (
+            passthrough_placeholder_sql(&node.id, "postgres-cdc"),
             StageKind::View,
             None,
         )
@@ -6932,6 +7004,7 @@ fn build_stage(
         .or_else(|| die_spec.map(|(message, condition)| RuntimeSpec::Die { message, condition }))
         .or_else(|| incremental.map(RuntimeSpec::Incremental))
         .or_else(|| ducklake_cdc.map(RuntimeSpec::DuckLakeCdc))
+        .or_else(|| pg_cdc.map(RuntimeSpec::PgCdc))
         .or_else(|| webhook.map(RuntimeSpec::Webhook))
         .or_else(|| remote_exec.map(RuntimeSpec::RemoteExec))
         .or_else(|| snowflake_sink.map(RuntimeSpec::SnowflakeSink))

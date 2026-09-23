@@ -1,7 +1,7 @@
 //! Backfill support: inspect, set, and clear the persisted state that a node
 //! advances only on a fully successful run.
 //!
-//! State lives at `<workspace>/state/<pipeline>/<node_id>.json`, and FIVE
+//! State lives at `<workspace>/state/<pipeline>/<node_id>.json`, and SIX
 //! different node kinds write there, each with its own shape:
 //!
 //! | kind          | written by             | shape                                    |
@@ -11,6 +11,7 @@
 //! | `kafka`       | `src.kafka`            | `{ topic, partition, next_offset }`      |
 //! | `spool`       | `src.spool`            | `{ path, next_offset }`                  |
 //! | `tumble`      | `xf.tumble`            | `{ buffer, watermark, emitted_through }` |
+//! | `pg_lsn`      | `src.postgres.cdc`     | `{ slot, lsn }`                          |
 //!
 //! Editing this lets an operator replay from an earlier point ("backfill from
 //! date X", "re-read from snapshot N") or clear it to force a full reload,
@@ -57,6 +58,10 @@ pub fn kind_of(v: &Value) -> &'static str {
         "kafka"
     } else if v.get("next_offset").is_some() {
         "spool"
+    } else if v.get("lsn").is_some() && v.get("slot").is_some() {
+        // Listed, never hand-editable: PostgreSQL will not move a slot back,
+        // and moving one forward by hand skips changes nobody received.
+        "pg_lsn"
     } else if v.get("snapshot_id").is_some() {
         "snapshot"
     } else if v.get("value").is_some() {
@@ -126,6 +131,7 @@ pub fn list(workspace: &Path, pipeline: &str) -> Vec<WatermarkEntry> {
             ),
             "spool" => format!("byte {}", as_str(v.get("next_offset"))),
             "tumble" => format!("watermark {}", as_str(v.get("watermark"))),
+            "pg_lsn" => format!("slot {} @ {}", as_str(v.get("slot")), as_str(v.get("lsn"))),
             _ => text.trim().chars().take(120).collect(),
         };
         out.push(WatermarkEntry {
@@ -340,7 +346,7 @@ mod shape_tests {
         std::fs::write(p, body).unwrap();
     }
 
-    /// Five node kinds write into one directory. State that exists and is
+    /// Six node kinds write into one directory. State that exists and is
     /// affecting runs must never be invisible to the operator managing it.
     #[test]
     fn every_state_shape_is_listed() {
@@ -349,6 +355,7 @@ mod shape_tests {
         write(d.path(), "p", "cdc", r#"{"snapshot_id":42}"#);
         write(d.path(), "p", "kaf", r#"{"topic":"orders","partition":0,"next_offset":991}"#);
         write(d.path(), "p", "spl", r#"{"path":"/spool/a.ndjson","next_offset":4096}"#);
+        write(d.path(), "p", "pgc", r#"{"slot":"duckle_orders","lsn":"0/15260B8"}"#);
         write(
             d.path(),
             "p",
@@ -367,6 +374,7 @@ mod shape_tests {
                 ("cdc", "snapshot"),
                 ("inc", "incremental"),
                 ("kaf", "kafka"),
+                ("pgc", "pg_lsn"),
                 ("spl", "spool"),
                 ("tum", "tumble"),
             ],
@@ -378,6 +386,8 @@ mod shape_tests {
         // The unfamiliar kinds still show what they hold, or listing them is useless.
         let kaf = got.iter().find(|e| e.node_id == "kaf").unwrap();
         assert!(kaf.value.contains("orders") && kaf.value.contains("991"), "{}", kaf.value);
+        let pgc = got.iter().find(|e| e.node_id == "pgc").unwrap();
+        assert!(pgc.value.contains("duckle_orders") && pgc.value.contains("0/15260B8"), "{}", pgc.value);
     }
 
     /// THE data-loss guard. `{value,type}` written over a tumbling window's

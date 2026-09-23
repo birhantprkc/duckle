@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "componentCount": 411,
+  "componentCount": 412,
   "components": [
     {
       "id": "src.csv",
@@ -4966,6 +4966,231 @@
                 "kind": "text",
                 "placeholder": "mysql://user:p%40ss@host:3306/db  or  host=... dbname=... user=... password=...",
                 "description": "Optional. When set, this exact string is used for the ATTACH and the host/port/user/password above are ignored. Use it to encode special characters yourself or supply a full connection URL."
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "src.postgres.cdc",
+      "label": "PostgreSQL CDC",
+      "kind": "source",
+      "availability": "available",
+      "summary": "Log-based change data capture: every insert, update and delete from a table, in commit order, read from a replication slot through the built-in pgoutput plugin. No JVM, no Kafka, nothing to install on the server. The position is saved only when the run succeeds, so a failed run re-delivers instead of losing changes.",
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ]
+      },
+      "manifest": {
+        "id": "src.postgres.cdc",
+        "kind": "source",
+        "label": "PostgreSQL CDC",
+        "description": "Log-based change data capture: every insert, update and delete from a table, in commit order, read from a replication slot through the built-in pgoutput plugin. No JVM, no Kafka, nothing to install on the server. The position is saved only when the run succeeds, so a failed run re-delivers instead of losing changes.",
+        "schemaSource": "autodetect",
+        "sections": [
+          {
+            "label": "Connection",
+            "fields": [
+              {
+                "key": "connectionRef",
+                "label": "Saved connection",
+                "kind": "connection-ref",
+                "accepts": [
+                  "postgres"
+                ],
+                "description": "Pick a connection from the Connections folder to auto-fill the fields below."
+              },
+              {
+                "key": "host",
+                "label": "Host",
+                "kind": "text",
+                "required": true,
+                "placeholder": "localhost"
+              },
+              {
+                "key": "port",
+                "label": "Port",
+                "kind": "integer",
+                "defaultValue": 5432
+              },
+              {
+                "key": "database",
+                "label": "Database",
+                "kind": "text",
+                "required": true,
+                "placeholder": "mydb"
+              },
+              {
+                "key": "username",
+                "label": "Username",
+                "kind": "text"
+              },
+              {
+                "key": "password",
+                "label": "Password",
+                "kind": "text",
+                "placeholder": "••••••••",
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Advanced connection (SSL)",
+            "fields": [
+              {
+                "key": "sslmode",
+                "label": "SSL mode",
+                "kind": "select",
+                "defaultValue": "",
+                "options": [
+                  {
+                    "label": "Default (driver negotiates)",
+                    "value": ""
+                  },
+                  {
+                    "label": "disable",
+                    "value": "disable"
+                  },
+                  {
+                    "label": "allow",
+                    "value": "allow"
+                  },
+                  {
+                    "label": "prefer",
+                    "value": "prefer"
+                  },
+                  {
+                    "label": "require",
+                    "value": "require"
+                  },
+                  {
+                    "label": "verify-ca",
+                    "value": "verify-ca"
+                  },
+                  {
+                    "label": "verify-full",
+                    "value": "verify-full"
+                  }
+                ],
+                "description": "libpq sslmode. Use require (or verify-ca / verify-full) for servers that enforce TLS."
+              },
+              {
+                "key": "sslrootcert",
+                "label": "SSL root cert",
+                "kind": "file-path",
+                "description": "CA certificate file (libpq sslrootcert). Required for verify-ca / verify-full."
+              },
+              {
+                "key": "sslcert",
+                "label": "SSL client cert",
+                "kind": "file-path",
+                "description": "Client certificate file for certificate-based auth (libpq sslcert)."
+              },
+              {
+                "key": "sslkey",
+                "label": "SSL client key",
+                "kind": "file-path",
+                "description": "Client private-key file (libpq sslkey)."
+              },
+              {
+                "key": "connectTimeout",
+                "label": "Connect timeout (s)",
+                "kind": "integer",
+                "description": "Maximum seconds to wait for a connection (libpq connect_timeout)."
+              },
+              {
+                "key": "options",
+                "label": "Session options",
+                "kind": "text",
+                "placeholder": "-c search_path=myschema",
+                "description": "Command-line options sent to the server on connect (libpq options), e.g. set the search_path."
+              },
+              {
+                "key": "connParams",
+                "label": "Extra parameters",
+                "kind": "text",
+                "placeholder": "key=value key2=value2",
+                "description": "Any additional libpq parameters, appended verbatim to the connection string."
+              }
+            ],
+            "collapsible": true,
+            "defaultCollapsed": true
+          },
+          {
+            "label": "Change feed",
+            "fields": [
+              {
+                "key": "table",
+                "label": "Table",
+                "kind": "text",
+                "required": true,
+                "placeholder": "public.orders",
+                "description": "The table to capture, as schema.table (public when no schema is given). Each change arrives as one row: _op (insert / update / delete), _lsn, _xid and _commit_ts, then the row itself, typed as the table declares it."
+              },
+              {
+                "key": "slotName",
+                "label": "Replication slot",
+                "kind": "text",
+                "required": true,
+                "placeholder": "duckle_orders",
+                "description": "One slot per pipeline that reads this table. PostgreSQL keeps WAL until the slot is consumed, so a slot nothing reads any more should be dropped: SELECT pg_drop_replication_slot('name'). Lowercase letters, digits and underscores."
+              },
+              {
+                "key": "publication",
+                "label": "Publication",
+                "kind": "text",
+                "placeholder": "<slot>_pub",
+                "description": "Defaults to the slot name with _pub. The one Duckle creates publishes insert, update and delete for this table only."
+              },
+              {
+                "key": "createIfMissing",
+                "label": "Create the publication and slot if missing",
+                "kind": "bool",
+                "defaultValue": true,
+                "description": "Needs a role allowed to create publications and replication slots, and wal_level = logical on the server. A new slot captures changes from the moment it is made: load the existing rows once with the PostgreSQL source."
+              },
+              {
+                "key": "connString",
+                "label": "Connection string (optional)",
+                "kind": "text",
+                "placeholder": "host=... port=5432 dbname=... user=...",
+                "description": "A libpq key-value string or postgresql:// URL. When set it replaces the host, port and credentials above."
+              }
+            ]
+          },
+          {
+            "label": "Limits",
+            "fields": [
+              {
+                "key": "batchSize",
+                "label": "Changes per run",
+                "kind": "integer",
+                "defaultValue": 100000,
+                "description": "Reading stops at the first transaction boundary past this, so a transaction is never split across runs. The rest arrive on the next run."
+              },
+              {
+                "key": "maxLagMb",
+                "label": "Warn when the slot holds more than (MB)",
+                "kind": "integer",
+                "defaultValue": 1024,
+                "description": "How much WAL the slot keeps on the server is reported on every run, with a warning past this. Consider max_slot_wal_keep_size on the server as a hard cap."
               }
             ]
           }
