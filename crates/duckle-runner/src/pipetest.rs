@@ -488,6 +488,14 @@ fn compare_inner(
 }
 
 /// Run one case and say what went wrong, or nothing.
+/// What a case's run produced: the asserted node's whole output, written to
+/// `dump` and read back, and the run it came from.
+struct Captured {
+    dump: PathBuf,
+    rows: Result<Vec<JsonValue>, String>,
+    result: duckle_duckdb_engine::RunResult,
+}
+
 fn run_case(
     engine: &DuckdbEngine,
     pipeline: &Path,
@@ -495,14 +503,35 @@ fn run_case(
     case: &Case,
     tmp: &Path,
 ) -> Option<String> {
-    let text = match std::fs::read_to_string(pipeline) {
-        Ok(t) => t,
-        Err(e) => return Some(format!("cannot read {}: {e}", pipeline.display())),
+    let Captured { dump, rows, result } = match capture(engine, pipeline, suite_dir, case, tmp) {
+        Ok(c) => c,
+        Err(why) => return Some(why),
     };
-    let mut doc: JsonValue = match serde_json::from_str(strip_bom(&text)) {
-        Ok(d) => d,
-        Err(e) => return Some(format!("{} is not valid JSON: {e}", pipeline.display())),
+    let actual = match rows {
+        Ok(rows) => rows,
+        // The node ran but wrote nothing readable. An empty expectation is
+        // still a legitimate assertion, so only a non-empty one fails here.
+        Err(e) if !case.rows.is_empty() => {
+            return Some(format!("{} produced no rows to compare ({e})", case.node))
+        }
+        Err(_) => Vec::new(),
     };
+    assert_captured(engine, case, &dump, &result, &actual)
+}
+
+/// Run a case and capture the node it asserts on. Shared by the assertion and
+/// by `--update-golden`, so a recorded golden is exactly what a test compares.
+fn capture(
+    engine: &DuckdbEngine,
+    pipeline: &Path,
+    suite_dir: &Path,
+    case: &Case,
+    tmp: &Path,
+) -> Result<Captured, String> {
+    let text = std::fs::read_to_string(pipeline)
+        .map_err(|e| format!("cannot read {}: {e}", pipeline.display()))?;
+    let mut doc: JsonValue = serde_json::from_str(strip_bom(&text))
+        .map_err(|e| format!("{} is not valid JSON: {e}", pipeline.display()))?;
     for (node, body) in &case.given {
         // A value naming a file that exists is the fixture itself - which is
         // how a Parquet or JSON fixture can stand in for a whole source. Any
@@ -523,16 +552,13 @@ fn run_case(
                     _ => "csv",
                 };
                 let f = tmp.join(format!("given_{node}.{ext}"));
-                if let Err(e) = std::fs::write(&f, body) {
-                    return Some(format!("cannot write the input for {node}: {e}"));
-                }
+                std::fs::write(&f, body)
+                    .map_err(|e| format!("cannot write the input for {node}: {e}"))?;
                 f
             }
         };
         let as_str = fixture.to_string_lossy().replace('\\', "/");
-        if let Err(e) = apply_given(&mut doc, node, &as_str) {
-            return Some(e);
-        }
+        apply_given(&mut doc, node, &as_str)?;
     }
     let mut doc_value = doc;
     // Compare the WHOLE relation, by writing it out and reading it back.
@@ -550,13 +576,9 @@ fn run_case(
     let dump = tmp.join(format!("expect_{}.json", safe_name(&case.node)));
     let _ = std::fs::remove_file(&dump);
     let sink_id = "__duckle_test_capture";
-    if let Err(e) = attach_capture_sink(&mut doc_value, &case.node, sink_id, &dump) {
-        return Some(e);
-    }
-    let mut parsed: PipelineDoc = match serde_json::from_value(doc_value) {
-        Ok(d) => d,
-        Err(e) => return Some(format!("pipeline did not load: {e}")),
-    };
+    attach_capture_sink(&mut doc_value, &case.node, sink_id, &dump)?;
+    let mut parsed: PipelineDoc =
+        serde_json::from_value(doc_value).map_err(|e| format!("pipeline did not load: {e}"))?;
     // The same resolution a run gets. Without it `duckle test` was the one
     // surface that resolved nothing, so a pipeline using ${date}, ${ENV:...} or
     // a saved connection ran under `duckle run` and failed under `duckle test` -
@@ -564,23 +586,80 @@ fn run_case(
     //
     // Applied AFTER the fixtures are substituted, so a `given` still replaces
     // the source it names and the resolution only touches what is left.
-    if let Err(e) = resolve_for_test(&mut parsed, pipeline) {
-        return Some(e);
-    }
+    resolve_for_test(&mut parsed, pipeline)?;
     let result =
         engine.execute_pipeline_with_events(&parsed, Some(sink_id), Some("test"), |_| {});
     if result.status != "ok" {
-        return Some(result.error.unwrap_or_else(|| "the run failed".into()));
+        return Err(result.error.unwrap_or_else(|| "the run failed".into()));
     }
-    let actual = match read_ndjson(&dump) {
-        Ok(rows) => rows,
-        // The node ran but wrote nothing readable. An empty expectation is
-        // still a legitimate assertion, so only a non-empty one fails here.
-        Err(e) if !case.rows.is_empty() => {
-            return Some(format!("{} produced no rows to compare ({e})", case.node))
+    let rows = read_ndjson(&dump);
+    Ok(Captured { dump, rows, result })
+}
+
+/// `--update-golden` for one suite file: record what each case's node produced
+/// as its expected rows. Returns (written, unchanged, failures).
+///
+/// Only a case that lists `rows` is touched - one asserting only structure has
+/// no rows to record. A case whose run fails keeps what it had, because a
+/// golden is what a WORKING run produced. The rest of the file is left as it
+/// was; serde_json keeps key order here (`preserve_order`), so the diff is the
+/// rows and nothing else.
+fn update_suite(
+    engine: &DuckdbEngine,
+    path: &Path,
+    text: &str,
+    pipeline: &Path,
+    cases: &[Case],
+    tmp: &Path,
+) -> Result<(usize, usize, Vec<Failure>), String> {
+    let mut doc: JsonValue = serde_json::from_str(strip_bom(text))
+        .map_err(|e| format!("{}: not valid JSON: {e}", path.display()))?;
+    let suite_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let (mut written, mut unchanged, mut failures) = (0usize, 0usize, Vec::new());
+    // `parse` makes one case per array entry, in order, so the index is the entry.
+    for (i, case) in cases.iter().enumerate() {
+        let pointer = format!("/cases/{i}/expect/rows");
+        if doc.pointer(&pointer).is_none() {
+            println!("  skip  {} (asserts no rows)", case.name);
+            continue;
         }
-        Err(_) => Vec::new(),
-    };
+        match capture(engine, pipeline, &suite_dir, case, tmp) {
+            Err(why) => {
+                println!("  FAIL  {}", case.name);
+                println!("        {why}");
+                failures.push(Failure { case: case.name.clone(), why });
+            }
+            Ok(captured) => {
+                let rows = JsonValue::Array(captured.rows.unwrap_or_default());
+                let slot = doc.pointer_mut(&pointer).expect("present, checked above");
+                if *slot == rows {
+                    unchanged += 1;
+                    println!("  same  {}", case.name);
+                } else {
+                    *slot = rows;
+                    written += 1;
+                    println!("  wrote {}", case.name);
+                }
+            }
+        }
+    }
+    if written > 0 {
+        let mut out = serde_json::to_string_pretty(&doc)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        out.push('\n');
+        std::fs::write(path, out).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    Ok((written, unchanged, failures))
+}
+
+/// Every assertion a case makes, against what its run captured.
+fn assert_captured(
+    engine: &DuckdbEngine,
+    case: &Case,
+    dump: &Path,
+    result: &duckle_duckdb_engine::RunResult,
+    actual: &[JsonValue],
+) -> Option<String> {
     // #250: types first. A row comparison cannot see DATE becoming VARCHAR or
     // BIGINT becoming DECIMAL - both sides render the same - so checking the
     // schema before the values means the failure names the real regression
@@ -898,10 +977,16 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
     // #312: the same three shapes `validate` emits, from the same module, so a
     // CI job reads one format across both gates.
     let mut format = String::new();
+    // #250: recording goldens is explicit, never a side effect of `test`.
+    let mut update_golden = false;
     let mut args = std::env::args().skip(2);
     while let Some(arg) = args.next() {
         if arg == "--json" {
             json_out = true;
+            continue;
+        }
+        if arg == "--update-golden" {
+            update_golden = true;
             continue;
         }
         if arg == "--format" {
@@ -925,6 +1010,14 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
             return ExitCode::from(2);
         }
         paths.push(PathBuf::from(arg));
+    }
+    // Recording is a local act done by a person looking at the diff; a CI
+    // report of a run that just rewrote its own expectations would say nothing.
+    if update_golden && (json_out || !format.is_empty()) {
+        eprintln!(
+            "duckle-runner test: --update-golden records goldens and prints no report; run it without --json and --format"
+        );
+        return ExitCode::from(2);
     }
     // Nothing named: every suite under ./tests, which is where a workspace keeps them.
     if paths.is_empty() {
@@ -951,6 +1044,7 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
     let engine = DuckdbEngine::new(duckdb);
 
     let (mut passed, mut failures) = (0usize, Vec::<Failure>::new());
+    let (mut written, mut unchanged) = (0usize, 0usize);
     let mut results: Vec<JsonValue> = Vec::new();
     let mut findings: Vec<crate::report::Finding> = Vec::new();
     for path in &paths {
@@ -968,6 +1062,21 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+        if update_golden {
+            match update_suite(&engine, path, &text, &pipeline, &cases, &tmp) {
+                Ok((w, u, f)) => {
+                    written += w;
+                    unchanged += u;
+                    failures.extend(f);
+                }
+                Err(e) => {
+                    eprintln!("duckle-runner test: {e}");
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
         for case in &cases {
             // Fixtures resolve beside the .test.json, which is this path.
             let suite_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -1009,6 +1118,14 @@ pub fn run(duckdb: PathBuf) -> ExitCode {
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
+
+    if update_golden {
+        println!();
+        println!("{written} golden(s) written, {unchanged} unchanged, {} failed", failures.len());
+        // A case that could not run is still a failure: recording the others
+        // does not make the suite healthy.
+        return if failures.is_empty() { ExitCode::from(0) } else { ExitCode::from(1) };
+    }
 
     if json_out || !format.is_empty() {
         match format.as_str() {
