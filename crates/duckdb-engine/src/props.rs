@@ -63,7 +63,7 @@ const UNIVERSAL: [&str; 10] = [
     "retryBackoffMs",    // beside retryAttempts
     "memoryLimitMb",     // plan/mod.rs:1887
     "continueOnFailure", // plan/mod.rs:1876
-    "logRowCount",       // panel-only today, no runtime read yet
+    "logRowCount",       // lib.rs row_count_wanted, both execution paths
     "sqlOverride",       // builders.rs:159, generic build_view_sql
     // The panel writes the OUTER key: `contracts.allowPii` is one nested field
     // inside a `contracts` object, and `check` only ever sees `contracts`.

@@ -997,6 +997,45 @@ fn rejects_can_be_grouped_by_their_error_code() {
     assert_eq!(got[0]["n"], 2, "{got:?}");
 }
 
+/// "Log row count" puts a ticked node's final count in the run log, on BOTH
+/// execution paths.
+///
+/// The toggle was in every node's Basic tab and nothing read it. The count it
+/// reports is the node's final one: on the per-stage path a view feeding a
+/// self-counting sink gets its figure back-filled from the sink, so at its own
+/// finish there may not be one yet.
+#[test]
+fn log_row_count_reports_the_final_count_on_both_paths() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n2\n3\n4\n5\n");
+    for (path, target) in [("batched", None), ("per-stage", Some("k"))] {
+        let out = out_path(tmp.path(), &format!("{path}.csv"));
+        let d = doc(
+            json!([
+                node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+                node("f", "xf.filter", json!({ "predicate": "id > 2", "logRowCount": true })),
+                node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ]),
+            json!([main_edge("e1", "s", "f"), main_edge("e2", "f", "k")]),
+        );
+        let mut logs: Vec<(String, String)> = Vec::new();
+        let r = engine.execute_pipeline_with_events(&d, target, None, |ev| {
+            if let duckle_duckdb_engine::PipelineEvent::Log { node_id, message, .. } = ev {
+                logs.push((node_id.clone(), message.clone()));
+            }
+        });
+        assert_eq!(r.status, "ok", "{path}: {:?}", r.error);
+        let for_f: Vec<&String> = logs.iter().filter(|(n, _)| n == "f").map(|(_, m)| m).collect();
+        assert_eq!(for_f.len(), 1, "{path}: one count line for the ticked node, got {logs:?}");
+        assert!(for_f[0].contains("3 rows"), "{path}: {}", for_f[0]);
+        assert!(
+            !logs.iter().any(|(n, _)| n == "s"),
+            "{path}: a node without the toggle stays quiet: {logs:?}"
+        );
+    }
+}
+
 /// A reject that is NOT an error keeps the bare row.
 ///
 /// A filter's misses and a join's unmatched rows are the data taking the other

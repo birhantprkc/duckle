@@ -1757,6 +1757,7 @@ impl DuckdbEngine {
                 total_start,
                 &mask::tags_from_doc(doc),
                 counts_need_every_column,
+                &row_count_wanted(doc),
                 &mut on_event,
             );
             return r;
@@ -3078,6 +3079,7 @@ impl DuckdbEngine {
             }
         }
 
+        row_count_logs(&compiled.stages, &nodes, &row_count_wanted(doc), &mut on_event);
         on_event(PipelineEvent::Finished {
             status: final_status.into(),
             duration_ms: total_start.elapsed().as_millis() as u64,
@@ -3147,6 +3149,8 @@ impl DuckdbEngine {
         // Same reason: whether any node asked for `ignoreErrors`, which decides
         // whether a row count has to read every column to be true.
         counts_need_every_column: bool,
+        // "Log row count", ticked nodes to their labels. Same reason again.
+        log_row_count: &std::collections::BTreeMap<String, String>,
         on_event: &mut dyn FnMut(PipelineEvent),
     ) -> RunResult {
         use std::io::Write;
@@ -3658,6 +3662,7 @@ impl DuckdbEngine {
             "ok"
         };
         let duration_ms = total_start.elapsed().as_millis() as u64;
+        row_count_logs(stages, &nodes, log_row_count, on_event);
         on_event(PipelineEvent::Finished {
             status: final_status.into(),
             duration_ms,
@@ -7354,6 +7359,43 @@ impl RunResult {
             artifacts: Vec::new(),
             artifacts_truncated: false,
         }
+    }
+}
+
+/// The nodes whose "Log row count" is ticked, with their labels.
+fn row_count_wanted(doc: &PipelineDoc) -> std::collections::BTreeMap<String, String> {
+    doc.nodes
+        .iter()
+        .filter(|n| {
+            n.data.properties.as_ref().and_then(|p| p.get("logRowCount")).and_then(|v| v.as_bool())
+                == Some(true)
+        })
+        .map(|n| (n.id.clone(), n.data.label.clone()))
+        .collect()
+}
+
+/// "Log row count": each ticked node's final count as a log line, in stage
+/// order, sent by BOTH execution paths just before the run finishes. Not at the
+/// node's own finish, because only then is every count settled - on the
+/// per-stage path a view feeding a self-counting sink has its figure back-filled
+/// from the sink afterwards.
+fn row_count_logs(
+    stages: &[plan::Stage],
+    nodes: &std::collections::BTreeMap<String, NodeRunStatus>,
+    wanted: &std::collections::BTreeMap<String, String>,
+    on_event: &mut dyn FnMut(PipelineEvent),
+) {
+    for stage in stages {
+        let (Some(label), Some(rows)) =
+            (wanted.get(&stage.node_id), nodes.get(&stage.node_id).and_then(|n| n.rows))
+        else {
+            continue;
+        };
+        on_event(PipelineEvent::Log {
+            node_id: stage.node_id.clone(),
+            level: "info".into(),
+            message: format!("{label}: {rows} rows"),
+        });
     }
 }
 

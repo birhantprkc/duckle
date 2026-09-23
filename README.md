@@ -3744,7 +3744,7 @@ Every node has an **Advanced** tab with fields the engine honours at run time:
 | **Retry attempts** | Total tries on failure (1 = no retry). Sleeps `backoff * attempt` ms between attempts. |
 | **Retry backoff (ms)** | Inter-attempt sleep, linearly scaled by attempt index. |
 | **Memory limit (MB)** | `PRAGMA memory_limit` applied to this stage only. |
-| **Log row count** | Print the post-stage rowcount to the run output. |
+| **Log row count** | When the run finishes, add a line with this node's final row count to the run's messages and its NDJSON log, on either execution path. |
 
 ### Orchestration and workspace
 

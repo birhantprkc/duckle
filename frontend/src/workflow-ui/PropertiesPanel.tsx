@@ -74,7 +74,7 @@ const ADVANCED_FIELDS: Field[] = [
         label: 'Log row count',
         kind: 'bool',
         defaultValue: false,
-        description: 'Print the post-stage row count to the run output (descriptive; row counts already surface in node badges).',
+        description: "When the run finishes, add a line with this node's final row count to the run's messages and its log, beside any Log node output.",
     },
     {
         key: 'sqlOverride',
