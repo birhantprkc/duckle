@@ -16299,6 +16299,17 @@ impl DuckdbEngine {
             &rejects,
             Some(&parent_failure_schema()),
         )?;
+        // #101: the envelope every error-type reject carries. `error` keeps the
+        // human-readable detail; the code is what automation groups on.
+        self.run(
+            Some(db),
+            &plan::reject_envelope_alter_sql(
+                &format!("{}__reject", spec.node_id),
+                &spec.node_id,
+                "request_failed",
+            ),
+            false,
+        )?;
         // #257: queued, not written. The deferred queue flushes only when the
         // WHOLE run succeeds, so a pipeline that fails after this stage does
         // not advance the cursor past rows no sink ever received.

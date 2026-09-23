@@ -3745,6 +3745,59 @@ pub(crate) fn quality_pass_predicate(component_id: &str, props: &JsonValue) -> R
     }
 }
 
+/// #101: the code a component's rejected rows carry, or None when its reject
+/// output is not an error.
+///
+/// A small closed set, so a downstream pipeline can group or route rejects by
+/// code without parsing a message. A filter's misses and a join's unmatched
+/// rows are the data taking the other branch, not a failure, so they have no
+/// code and stay the bare row.
+pub(crate) fn reject_error_code(component_id: &str) -> Option<&'static str> {
+    Some(match component_id {
+        "qa.notnull" => "not_null",
+        "qa.schemavalidate" => "missing_value",
+        "qa.range" => "out_of_range",
+        "qa.regex" => "pattern_mismatch",
+        "qa.unique" => "duplicate_key",
+        "qa.refintegrity" => "orphan_key",
+        "qa.outlier" => "outlier",
+        "src.csv" | "src.tsv" => "parse_error",
+        _ => return None,
+    })
+}
+
+/// Append the #101 envelope to an error-type reject body: which node rejected
+/// the row, why, and when. It goes after the row's own columns, which are left
+/// exactly as they were. `__rejected_at` matches the dead-letter file's column
+/// of the same name, and the `__` prefix keeps clear of a user's own columns.
+pub(crate) fn with_reject_envelope(component_id: &str, node_id: &str, body: String) -> String {
+    match reject_error_code(component_id) {
+        Some(code) => format!(
+            "SELECT *, '{}' AS __node_id, '{}' AS __error_code, CURRENT_TIMESTAMP AS __rejected_at FROM ({})",
+            sql_escape(node_id),
+            code,
+            body
+        ),
+        None => body,
+    }
+}
+
+/// The same envelope for a reject TABLE a runtime executor has already written,
+/// such as the REST family's failed parents, which never pass through compiled
+/// SQL. Same names, types and values as `with_reject_envelope`, so rejects from
+/// either kind of node union without a cast. Runs on an empty table too, so a
+/// clean run's reject relation has the shape a failing one would.
+pub(crate) fn reject_envelope_alter_sql(table: &str, node_id: &str, code: &str) -> String {
+    let t = quote_ident(table);
+    format!(
+        "ALTER TABLE {t} ADD COLUMN __node_id VARCHAR DEFAULT '{}'; \
+         ALTER TABLE {t} ADD COLUMN __error_code VARCHAR DEFAULT '{}'; \
+         ALTER TABLE {t} ADD COLUMN __rejected_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;",
+        sql_escape(node_id),
+        sql_escape(code)
+    )
+}
+
 /// Reject-port SQL for components that split rows. None = no reject table.
 pub(crate) fn build_reject_sql(
     component_id: &str,

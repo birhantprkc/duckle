@@ -90,7 +90,7 @@ export async function deriveSchemaFromEngine(
 
     const inputs = edges
         .filter(e => e.target === nodeId)
-        .map(e => [e.source, resolveOutputSchema(e.source, nodes, edges)] as const)
+        .map(e => [e.source, edgeSchema(e, nodes, edges, new Set())] as const)
         .filter(([, cols]) => cols.length > 0);
     // A remote source has no upstream by definition, and is exactly the node
     // whose SQL Duckle cannot bind - so it is also the node the dialect-neutral
@@ -427,6 +427,32 @@ function computeNodeSchema(
     return upstream();
 }
 
+/**
+ * #101: the columns an error-type reject adds after the row's own. A source's
+ * or a quality check's reject port carries them; a filter's or a join's does
+ * not, because that branch is the data going the other way, not an error.
+ * The engine test `every_error_reject_port_carries_the_envelope` keeps the
+ * `src.` / `qa.` rule true as components are added.
+ */
+const REJECT_ENVELOPE: Column[] = [
+    { name: '__node_id', type: 'string', nullable: false },
+    { name: '__error_code', type: 'string', nullable: false },
+    { name: '__rejected_at', type: 'timestamp', nullable: false },
+];
+
+/** The schema an edge carries: its source's output, plus the envelope on an error reject. */
+function edgeSchema(
+    e: Edge,
+    nodes: Node<DuckleNodeData>[],
+    edges: Edge[],
+    visiting: Set<string>,
+): Column[] {
+    const cols = resolveOutputSchema(e.source, nodes, edges, visiting);
+    if (e.sourceHandle !== 'reject') return cols;
+    const id = nodes.find(n => n.id === e.source)?.data.componentId ?? '';
+    return id.startsWith('src.') || id.startsWith('qa.') ? [...cols, ...REJECT_ENVELOPE] : cols;
+}
+
 function mergedUpstream(
     nodeId: string,
     nodes: Node<DuckleNodeData>[],
@@ -438,7 +464,7 @@ function mergedUpstream(
     const cols: Column[] = [];
     const seen = new Set<string>();
     for (const e of incoming) {
-        const upSchema = resolveOutputSchema(e.source, nodes, edges, visiting);
+        const upSchema = edgeSchema(e, nodes, edges, visiting);
         for (const c of upSchema) {
             if (!seen.has(c.name)) {
                 seen.add(c.name);
@@ -457,7 +483,7 @@ function mainUpstream(
     visiting: Set<string>,
 ): Column[] {
     const main = edges.filter(e => e.target === nodeId && (e.targetHandle ?? 'main') === 'main');
-    return main.length ? resolveOutputSchema(main[0].source, nodes, edges, visiting) : [];
+    return main.length ? edgeSchema(main[0], nodes, edges, visiting) : [];
 }
 
 /**
@@ -486,7 +512,7 @@ export function resolveInputPortSchemas(
     for (const e of incoming) {
         const portId = e.targetHandle ?? 'main';
         const arr = byPort.get(portId) ?? [];
-        const sourceSchema = resolveOutputSchema(e.source, nodes, edges, new Set());
+        const sourceSchema = edgeSchema(e, nodes, edges, new Set());
         for (const c of sourceSchema) {
             if (!arr.some(x => x.name === c.name)) arr.push(c);
         }

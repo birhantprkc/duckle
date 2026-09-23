@@ -757,6 +757,40 @@ mod tests {
     /// `returnsRows` - the handoff that lets a child give its rows back to the
     /// parent through ${DUCKLE_RETURN} - was read by the engine and declared by
     /// no form, so the feature could only be reached by hand.
+    /// #101: the editor shows the reject envelope's columns downstream of any
+    /// `src.*` or `qa.*` reject port and no other (`edgeSchema` in
+    /// schema-resolve.ts), because its column pickers offer only what it lists.
+    /// That rule holds only while every such port really carries the envelope:
+    /// a SQL-side reject through `reject_error_code`, or a REST-family source
+    /// through its executor. A new validator or source with a reject port and
+    /// neither would show columns the engine never writes.
+    #[test]
+    fn every_error_reject_port_carries_the_envelope() {
+        let catalog: serde_json::Value = serde_json::from_str(CATALOG).expect("catalog parses");
+        let mut checked = 0;
+        for c in catalog["components"].as_array().expect("components") {
+            let id = c["id"].as_str().unwrap_or_default();
+            let has_reject = c["ports"]["outputs"]
+                .as_array()
+                .is_some_and(|o| o.iter().any(|p| p["id"] == "reject"));
+            if !has_reject {
+                continue;
+            }
+            checked += 1;
+            let editor_shows_it = id.starts_with("src.") || id.starts_with("qa.");
+            let engine_writes_it = crate::plan::reject_error_code(id).is_some()
+                || crate::plan::reads_incremental(id);
+            assert_eq!(
+                editor_shows_it, engine_writes_it,
+                "{id}: the editor {} the envelope columns and the engine {} them",
+                if editor_shows_it { "shows" } else { "hides" },
+                if engine_writes_it { "writes" } else { "does not write" },
+            );
+        }
+        // 45 reject ports today. Far fewer means the scan stopped seeing them.
+        assert!(checked >= 40, "only {checked} reject ports found in the catalog");
+    }
+
     #[test]
     fn a_child_pipeline_node_offers_the_handoff_and_not_the_fiction() {
         for id in ["ctl.runpipeline", "ctl.runjob", "ctl.trigger"] {

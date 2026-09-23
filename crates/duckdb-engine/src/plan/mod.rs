@@ -6649,9 +6649,11 @@ fn build_stage(
         // otherwise materialized the whole rejected set to disk for nothing
         // (a 10M -> 2M filter wrote 8M rejected rows, ~12s of pure waste).
         let reject_sql = if reject_consumers >= 1 {
-            build_reject_sql(component_id, &props, inputs, node.data.schema.as_deref()).map_err(|e| {
-                EngineError::Config(format!("{} ({} / {}): {}", node.data.label, component_id, node.id, e))
-            })?
+            build_reject_sql(component_id, &props, inputs, node.data.schema.as_deref())
+                .map_err(|e| {
+                    EngineError::Config(format!("{} ({} / {}): {}", node.data.label, component_id, node.id, e))
+                })?
+                .map(|body| builders::with_reject_envelope(component_id, &node.id, body))
         } else {
             None
         };

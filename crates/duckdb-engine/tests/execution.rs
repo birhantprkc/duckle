@@ -885,6 +885,143 @@ fn custom_sql_runs_with_input_alias() {
     assert_eq!(dbl, "20");
 }
 
+/// #101: a reject that is an ERROR carries a machine-readable envelope.
+///
+/// Each of these rejected its rows as the bare input row, so a downstream
+/// pipeline that wanted to group failures, route them, or retry some had to know
+/// which node sent them and parse nothing to learn why - there was nothing to
+/// parse. Every error-type reject now adds `__node_id`, `__error_code` from a
+/// small closed set, and `__rejected_at`, after the row's own columns, so the
+/// row itself is unchanged. The `__` prefix is the one the dead-letter file's
+/// `__rejected_at` already uses, and keeps clear of a user's own `node_id`.
+#[test]
+fn an_error_reject_carries_the_envelope() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let rows = write_file(tmp.path(), "rows.csv", "id,email,n,k\n1,a@x.io,5,1\n2,,50,1\n3,nope,5,2\n");
+    let refs = write_file(tmp.path(), "refs.csv", "k\n2\n");
+    let wide = write_file(
+        tmp.path(),
+        "wide.csv",
+        "id,amount\n1,10\n2,11\n3,12\n4,13\n5,1000\n",
+    );
+    let cases: Vec<(&str, Value, &str)> = vec![
+        ("qa.notnull", json!({ "columns": ["email"] }), "not_null"),
+        ("qa.schemavalidate", json!({ "expectedColumns": ["email"] }), "missing_value"),
+        ("qa.range", json!({ "column": "n", "min": 0, "max": 10 }), "out_of_range"),
+        ("qa.regex", json!({ "column": "email", "pattern": ".+@.+" }), "pattern_mismatch"),
+        ("qa.unique", json!({ "columns": ["k"] }), "duplicate_key"),
+        ("qa.refintegrity", json!({ "leftKey": "k", "rightKey": "k" }), "orphan_key"),
+        ("qa.outlier", json!({ "column": "amount", "method": "iqr" }), "outlier"),
+    ];
+    for (component, props, code) in cases {
+        let src = if component == "qa.outlier" { &wide } else { &rows };
+        let rej = out_path(tmp.path(), &format!("{}.parquet", component.replace('.', "_")));
+        let mut nodes = vec![
+            node("s", "src.csv", json!({ "path": src, "hasHeader": true })),
+            node("q", component, props),
+            node("kr", "snk.parquet", json!({ "path": rej, "mode": "overwrite" })),
+        ];
+        let mut edges = vec![main_edge("e1", "s", "q"), port_edge("e2", "q", "reject", "kr")];
+        if component == "qa.refintegrity" {
+            nodes.push(node("r", "src.csv", json!({ "path": refs, "hasHeader": true })));
+            edges.push(lookup_edge("e3", "r", "q"));
+        }
+        let result = engine.execute_pipeline(&doc(json!(nodes), json!(edges)));
+        assert_eq!(result.status, "ok", "{component}: run failed: {:?}", result.error);
+        let got = duckdb_json(&format!(
+            "SELECT __node_id, __error_code, __rejected_at IS NOT NULL AS stamped, count(*) AS n \
+             FROM read_parquet('{rej}') GROUP BY ALL"
+        ));
+        assert_eq!(got.len(), 1, "{component}: expected one envelope group, got {got:?}");
+        assert_eq!(got[0]["__node_id"], "q", "{component}: {got:?}");
+        assert_eq!(got[0]["__error_code"], code, "{component}: {got:?}");
+        assert_eq!(got[0]["stamped"], true, "{component}: {got:?}");
+        assert!(got[0]["n"].as_i64().unwrap_or(0) >= 1, "{component} rejected nothing: {got:?}");
+        // The envelope goes AFTER the row, which is left exactly as it was.
+        let first = duckdb_json(&format!("DESCRIBE SELECT * FROM read_parquet('{rej}')"));
+        assert_eq!(first[0]["column_name"], "id", "{component}: the row's own columns come first");
+    }
+
+    // A CSV row that will not parse into its declared type is a parse error.
+    let bad = write_file(tmp.path(), "typed.csv", "id,n\n1,5\n2,oops\n");
+    let rej = out_path(tmp.path(), "csv_reject.parquet");
+    let mut source = node("s", "src.csv", json!({ "path": bad, "hasHeader": true }));
+    source["data"]["schema"] = json!([
+        { "name": "id", "type": "int64" },
+        { "name": "n", "type": "int64" }
+    ]);
+    let result = engine.execute_pipeline(&doc(
+        json!([source, node("kr", "snk.parquet", json!({ "path": rej, "mode": "overwrite" }))]),
+        json!([port_edge("e1", "s", "reject", "kr")]),
+    ));
+    assert_eq!(result.status, "ok", "csv: run failed: {:?}", result.error);
+    assert_eq!(
+        scalar_string(&format!("SELECT __error_code FROM read_parquet('{rej}')")),
+        "parse_error"
+    );
+}
+
+/// The envelope is usable downstream: rejects group by their code.
+///
+/// The planner checks a node's column references against what its upstream
+/// exposes, and it models a reject output as having its node's own columns. A
+/// column the envelope adds would then be "unknown" to exactly the step the
+/// envelope exists for.
+#[test]
+fn rejects_can_be_grouped_by_their_error_code() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id,email\n1,a@x.io\n2,\n3,\n");
+    let out = out_path(tmp.path(), "by_code.csv");
+    let result = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("q", "qa.notnull", json!({ "columns": ["email"] })),
+            node("g", "xf.groupby", json!({
+                "groupKeys": ["__error_code"],
+                "aggregations": [{ "column": "id", "func": "count", "output": "n" }]
+            })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([
+            main_edge("e1", "s", "q"),
+            port_edge("e2", "q", "reject", "g"),
+            main_edge("e3", "g", "k"),
+        ]),
+    ));
+    assert_eq!(result.status, "ok", "run failed: {:?}", result.error);
+    let got = duckdb_json(&format!("SELECT __error_code, n FROM read_csv_auto('{out}')"));
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0]["__error_code"], "not_null", "{got:?}");
+    assert_eq!(got[0]["n"], 2, "{got:?}");
+}
+
+/// A reject that is NOT an error keeps the bare row.
+///
+/// A filter's misses and a join's unmatched rows are the data taking the other
+/// branch. Stamping them with an error code would make every such branch look
+/// like failures to anything grouping rejects by code.
+#[test]
+fn a_filter_reject_stays_the_bare_row() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n2\n");
+    let rej = out_path(tmp.path(), "rej.parquet");
+    let result = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("f", "xf.filter", json!({ "predicate": "id > 1" })),
+            node("kr", "snk.parquet", json!({ "path": rej, "mode": "overwrite" })),
+        ]),
+        json!([main_edge("e1", "s", "f"), port_edge("e2", "f", "reject", "kr")]),
+    ));
+    assert_eq!(result.status, "ok", "run failed: {:?}", result.error);
+    let cols = duckdb_json(&format!("DESCRIBE SELECT * FROM read_parquet('{rej}')"));
+    let names: Vec<&str> = cols.iter().filter_map(|c| c["column_name"].as_str()).collect();
+    assert_eq!(names, vec!["id"], "a filter's other branch is not an error");
+}
+
 #[test]
 fn quality_range_splits_pass_and_reject() {
     // A Range validator must route in-range rows to its main output and
@@ -17419,6 +17556,16 @@ fn a_failed_parent_becomes_a_reject_row_instead_of_ending_the_run() {
         rej
     ));
     assert!(err.contains("500"), "and why: {err}");
+    // #101: the same envelope every error-type reject carries, so failed parents
+    // group and route with quality rejects without anything parsing `error`.
+    let envelope = duckdb_json(&format!(
+        "SELECT __node_id, __error_code, __rejected_at IS NOT NULL AS stamped FROM read_csv_auto('{}')",
+        rej
+    ));
+    assert_eq!(envelope.len(), 1, "one failed parent, one envelope: {envelope:?}");
+    assert_eq!(envelope[0]["__node_id"], "c", "{envelope:?}");
+    assert_eq!(envelope[0]["__error_code"], "request_failed", "{envelope:?}");
+    assert_eq!(envelope[0]["stamped"], true, "{envelope:?}");
 }
 
 /// row count alone cannot tell you the parent's value ever reached the URL.
