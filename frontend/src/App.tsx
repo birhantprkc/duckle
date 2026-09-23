@@ -2210,14 +2210,15 @@ export default function App() {
     };
 
     const handleCreatePipeline = useCallback(
-        (rawName: string, parentId: string, template: PipelineTemplate) => {
+        (rawName: string, parentId: string, template: PipelineTemplate, built?: PipelineState) => {
             const id = freshId('p');
             const realParent = repo.find(
                 i => i.id === parentId && (i.type === 'folder' || i.type === 'project'),
             )
                 ? parentId
                 : 'pipelines';
-            const seed = seedTemplate(template);
+            // From SQL arrives already built; the other templates are seeded here.
+            const seed = built ?? seedTemplate(template);
             setRepo(r => [...r, { id, name: rawName, type: 'pipeline', parentId: realParent }]);
             setPipelineData(d => ({ ...d, [id]: seed }));
             setJobs(js => [...js, { id, name: rawName, dirty: false }]);

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { RepoItem } from '../repo-types';
+import { pipelineFromSql, type FromSql } from '../tauri-bridge';
 
 export type PipelineTemplate = 'empty' | 'sample-csv-to-parquet' | 'sample-join-groupby' | 'from-sql';
 
@@ -10,7 +11,8 @@ type Props = {
     defaultParentId: string;
     repoItems: RepoItem[];
     onCancel: () => void;
-    onCreate: (name: string, parentId: string, template: PipelineTemplate) => void;
+    /** `seed` is the finished graph when the template built one (From SQL). */
+    onCreate: (name: string, parentId: string, template: PipelineTemplate, seed?: FromSql['pipeline']) => void;
 };
 
 const TEMPLATES: { id: PipelineTemplate; label: string; description: string; available: boolean }[] = [
@@ -35,8 +37,8 @@ const TEMPLATES: { id: PipelineTemplate; label: string; description: string; ava
     {
         id: 'from-sql',
         label: 'From SQL',
-        description: 'Paste a SELECT statement and generate the graph. (coming soon)',
-        available: false,
+        description: 'Paste a SELECT: one step per CTE, and a source for each table it reads.',
+        available: true,
     },
 ];
 
@@ -62,6 +64,9 @@ export default function NewPipelineModal(props: Props) {
     const [name, setName] = useState('');
     const [parentId, setParentId] = useState(defaultParentId);
     const [template, setTemplate] = useState<PipelineTemplate>('empty');
+    const [sql, setSql] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
     const nameRef = useRef<HTMLInputElement>(null);
 
     const folderOptions = useMemo(
@@ -76,6 +81,9 @@ export default function NewPipelineModal(props: Props) {
         if (open) {
             setName('');
             setTemplate('empty');
+            setSql('');
+            setError('');
+            setBusy(false);
             setParentId(defaultParentId);
             setTimeout(() => nameRef.current?.focus(), 30);
         }
@@ -96,11 +104,31 @@ export default function NewPipelineModal(props: Props) {
     if (!open) return null;
 
     const sanitized = sanitizeName(name);
-    const canCreate = sanitized.length > 0;
+    const fromSql = template === 'from-sql';
+    const canCreate = sanitized.length > 0 && !busy && (!fromSql || sql.trim().length > 0);
 
-    const handleCreate = () => {
+    const handleCreate = async () => {
         if (!canCreate) return;
-        onCreate(sanitized, parentId, template);
+        if (!fromSql) {
+            onCreate(sanitized, parentId, template);
+            return;
+        }
+        // Converted here, so a query that will not parse is said in the dialog
+        // and can be fixed, rather than opening a pipeline that is empty.
+        setBusy(true);
+        setError('');
+        try {
+            const built = await pipelineFromSql(sql);
+            if (!built) {
+                setError('From SQL needs the desktop app or the web editor.');
+                return;
+            }
+            onCreate(sanitized, parentId, template, built.pipeline);
+        } catch (e) {
+            setError(String(e));
+        } finally {
+            setBusy(false);
+        }
     };
 
     return createPortal(
@@ -188,6 +216,24 @@ export default function NewPipelineModal(props: Props) {
                             ))}
                         </div>
                     </div>
+                    {fromSql ? (
+                        <div className="modal-field">
+                            <label className="modal-field-label">SELECT to convert</label>
+                            <textarea
+                                className="modal-input"
+                                rows={8}
+                                value={sql}
+                                placeholder={'WITH paid AS (SELECT * FROM orders WHERE status = \'paid\')\nSELECT customer_id, sum(amount) FROM paid GROUP BY customer_id'}
+                                onChange={e => setSql(e.target.value)}
+                                spellCheck={false}
+                            />
+                            <div className="modal-field-hint">
+                                Each CTE becomes a step named after it; each table the query reads becomes a
+                                source to point at your data.
+                            </div>
+                            {error ? <div className="modal-field-hint field-warning">{error}</div> : null}
+                        </div>
+                    ) : null}
                 </div>
 
                 <div className="modal-footer">
@@ -200,7 +246,7 @@ export default function NewPipelineModal(props: Props) {
                         onClick={handleCreate}
                         disabled={!canCreate}
                     >
-                        Create
+                        {busy ? 'Converting...' : 'Create'}
                     </button>
                 </div>
             </div>

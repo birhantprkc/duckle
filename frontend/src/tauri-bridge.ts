@@ -922,6 +922,18 @@ export async function completeNodeSql(
     }
 }
 
+/** "From SQL": the pipeline a pasted SELECT becomes, one step per CTE. */
+export type FromSql = {
+    pipeline: { nodes: Node<DuckleNodeData>[]; edges: Edge[] };
+    /** Why the query stayed one step, when it could not be split. */
+    keptWhole: string | null;
+};
+
+export async function pipelineFromSql(sql: string): Promise<FromSql | null> {
+    if (!isTauri() && !isWebBackend()) return null;
+    return await invoke<FromSql>('pipeline_from_sql', { sql });
+}
+
 /** A resolved origin column for lineage (#103). */
 export type LineageRoot = { node: string; column: string };
 /** node id -> [output column name, root source columns][]. */

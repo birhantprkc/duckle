@@ -330,6 +330,16 @@ A worked example using the bundled `samples/orders.csv` data.
 - Cancel mid-run with the **Stop** button - the DuckDB process is killed cleanly.
 - Save your work: **Cmd/Ctrl-S** writes a JSON pipeline file to your workspace folder.
 
+### Or start from a query you already have
+
+**New pipeline -> From SQL**, then paste a `SELECT`. Each CTE becomes a SQL step
+named after it, the final `SELECT` becomes the last one, and each table the
+query reads becomes a source node to point at your data. The steps still read
+each other by name, so the pipeline computes exactly what the query did (a test
+runs both and compares the rows). Files named in the query (`FROM
+'orders.csv'`) stay in the SQL. A `WITH RECURSIVE` query is kept as one step,
+and the node says why.
+
 ---
 
 ## Where Duckle runs

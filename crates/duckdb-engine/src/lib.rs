@@ -58,6 +58,7 @@ pub mod rundiff;
 pub mod props;
 pub mod affected;
 pub mod format;
+pub mod fromsql;
 pub mod catalog;
 pub mod runlock;
 pub mod s3;
@@ -1253,6 +1254,49 @@ impl DuckdbEngine {
     /// (json_serialize_sql, a core function - no extension) and resolves the
     /// lineage from it. Foundation for impact analysis / breaking-change diff /
     /// data contracts.
+    /// "From SQL": a pipeline document from a pasted SELECT, one step per CTE
+    /// (see `fromsql`). Also returns why, when the query had to be kept as one
+    /// step.
+    pub fn pipeline_from_sql(&self, sql: &str) -> Result<(JsonValue, Option<String>), EngineError> {
+        let q = format!("SELECT json_serialize_sql('{}') AS ast", sql_escape(sql));
+        let ast = self
+            .run_rows(None, &q)?
+            .into_iter()
+            .next()
+            .and_then(|r| r.get("ast").cloned())
+            .ok_or_else(|| EngineError::Query("from sql: no AST returned".into()))?;
+        let ast = match ast {
+            JsonValue::String(s) => serde_json::from_str(&s)
+                .map_err(|e| EngineError::Query(format!("from sql: parse AST: {e}")))?,
+            other => other,
+        };
+        let split = fromsql::split(&ast).map_err(EngineError::Query)?;
+        // Every part back to SQL in one round trip, so the steps are DuckDB's
+        // own reading of the query rather than text sliced out of it.
+        let back: Vec<String> = split
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "SELECT {i} AS i, json_deserialize_sql('{}') AS sql",
+                    sql_escape(&fromsql::statement_json(&p.node))
+                )
+            })
+            .collect();
+        let mut sql_of = vec![String::new(); split.parts.len()];
+        for row in self.run_rows(None, &format!("{} ORDER BY i", back.join(" UNION ALL ")))? {
+            let i = row.get("i").and_then(JsonValue::as_u64).unwrap_or(u64::MAX) as usize;
+            if let (Some(slot), Some(text)) = (sql_of.get_mut(i), row.get("sql").and_then(JsonValue::as_str)) {
+                *slot = text.to_string();
+            }
+        }
+        if sql_of.iter().any(String::is_empty) {
+            return Err(EngineError::Query("from sql: a step could not be turned back into SQL".into()));
+        }
+        Ok((fromsql::pipeline(&split, &sql_of), split.kept_whole.clone()))
+    }
+
     pub fn column_lineage(&self, sql: &str) -> Result<Vec<lineage::OutputColumn>, EngineError> {
         let q = format!("SELECT json_serialize_sql('{}') AS ast", sql_escape(sql));
         let rows = self.run_rows(None, &q)?;
@@ -8570,6 +8614,7 @@ mod cloud_secret_tests {
         .expect("still makes one");
         assert!(!blank.contains("REGION"), "got: {blank}");
     }
+
 }
 
 #[cfg(test)]

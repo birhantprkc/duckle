@@ -193,6 +193,7 @@ pub fn run() {
             complete_node_sql,
             describe_node_columns,
             pipeline_column_lineage,
+            pipeline_from_sql,
             pipeline_trust_report,
             schedule_set_workspace,
             schedule_list,
@@ -721,6 +722,14 @@ fn complete_node_sql(
     engine()?
         .complete_node_sql(&pipeline, &node_id, &inputs, cursor, limit.unwrap_or(12))
         .map_err(|e| e.to_string())
+}
+
+/// "From SQL": a pasted SELECT as a pipeline, one step per CTE. `keptWhole`
+/// says why, when the query had to stay one step. Read-only.
+#[tauri::command]
+fn pipeline_from_sql(sql: String) -> Result<serde_json::Value, String> {
+    let (pipeline, kept_whole) = engine()?.pipeline_from_sql(&sql).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "pipeline": pipeline, "keptWhole": kept_whole }))
 }
 
 /// Column-level lineage for the whole pipeline: each node's output columns

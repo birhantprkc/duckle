@@ -1217,6 +1217,18 @@ fn dispatch_cmd(state: &WebState, who: &console_auth::Identity, cmd: &str, body:
                 Err(e) => respond_err("400 Bad Request", &e.to_string()),
             }
         }
+        // "From SQL": the same conversion as the desktop command. Without an arm
+        // here the shim would answer with nothing and the template would open
+        // an empty canvas on the web.
+        "pipeline_from_sql" => {
+            let args: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let sql = args.get("sql").and_then(|v| v.as_str()).unwrap_or_default();
+            let engine = DuckdbEngine::new(state.duckdb.clone());
+            match engine.pipeline_from_sql(sql) {
+                Ok((pipeline, kept_whole)) => respond_json(&json!({ "pipeline": pipeline, "keptWhole": kept_whole })),
+                Err(e) => respond_err("400 Bad Request", &e.to_string()),
+            }
+        }
         "pipeline_column_lineage" => {
             let args: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
             let mut doc: PipelineDoc = match serde_json::from_value(args.get("pipeline").cloned().unwrap_or(Value::Null)) {
