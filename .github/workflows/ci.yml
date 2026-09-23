@@ -386,13 +386,24 @@ jobs:
       - name: Start MinIO and the Iceberg REST catalog
         run: |
           set -e
+          # minio/minio and minio/mc are no longer pullable from Docker Hub; the
+          # same pinned quay.io images and retry the minio job above uses.
+          for i in 1 2 3; do
+            docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 && break
+            echo "docker pull attempt $i failed; retrying in 5s"; sleep 5
+          done
+          for i in 1 2 3; do
+            docker pull quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z && break
+            echo "mc pull attempt $i failed; retrying in 5s"; sleep 5
+          done
           docker network create ice
           docker run -d --name minio --network ice -p 9000:9000 \
             -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=password \
-            minio/minio server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 server /data
           for i in $(seq 1 30); do curl -sf http://localhost:9000/minio/health/live && break; sleep 2; done
-          docker run --rm --network ice --entrypoint sh minio/mc -c \
-            "mc alias set m http://minio:9000 admin password && mc mb m/warehouse"
+          docker run --rm --network host \
+            -e MC_HOST_local=http://admin:password@localhost:9000 \
+            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z mb --ignore-existing local/warehouse
           docker run -d --name rest --network ice -p 8181:8181 \
             -e AWS_ACCESS_KEY_ID=admin -e AWS_SECRET_ACCESS_KEY=password -e AWS_REGION=us-east-1 \
             -e CATALOG_WAREHOUSE=s3://warehouse/ \

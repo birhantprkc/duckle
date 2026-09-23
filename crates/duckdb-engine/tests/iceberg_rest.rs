@@ -7,7 +7,7 @@
 //!
 //!   docker network create ice
 //!   docker run -d --network ice --name minio -p 59000:9000 \
-//!     -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=password minio/minio server /data
+//!     -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=password quay.io/minio/minio server /data
 //!   (create a bucket named `warehouse`)
 //!   docker run -d --network ice -p 58181:8181 -e AWS_ACCESS_KEY_ID=admin \
 //!     -e AWS_SECRET_ACCESS_KEY=password -e AWS_REGION=us-east-1 \
