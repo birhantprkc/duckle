@@ -4347,12 +4347,304 @@
             "label": "Table",
             "fields": [
               {
+                "key": "catalog",
+                "label": "Where the table lives",
+                "kind": "select",
+                "defaultValue": "path",
+                "options": [
+                  {
+                    "label": "A table directory",
+                    "value": "path"
+                  },
+                  {
+                    "label": "A REST catalog",
+                    "value": "rest"
+                  }
+                ]
+              },
+              {
                 "key": "path",
-                "label": "Table path",
+                "label": "Table directory",
                 "kind": "text",
-                "required": true,
-                "placeholder": "s3://lake/orders/  or  /var/lakes/orders",
-                "description": "The Iceberg / Delta table root: a local directory or an s3:// URL."
+                "placeholder": "/data/lake/orders",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "path"
+                },
+                "description": "The table directory, holding metadata/."
+              },
+              {
+                "key": "catalogUri",
+                "label": "Catalog URI",
+                "kind": "text",
+                "placeholder": "https://catalog.example.com/api/catalog",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "The REST catalog endpoint."
+              },
+              {
+                "key": "warehouse",
+                "label": "Warehouse",
+                "kind": "text",
+                "placeholder": "warehouse",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "The warehouse the catalog serves, as it names it."
+              },
+              {
+                "key": "namespace",
+                "label": "Namespace",
+                "kind": "text",
+                "placeholder": "sales",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "table",
+                "label": "Table",
+                "kind": "text",
+                "placeholder": "orders",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              }
+            ]
+          },
+          {
+            "label": "Catalog sign-in",
+            "fields": [
+              {
+                "key": "authType",
+                "label": "Authentication",
+                "kind": "select",
+                "defaultValue": "none",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "None",
+                    "value": "none"
+                  },
+                  {
+                    "label": "OAuth2 client credentials",
+                    "value": "oauth2"
+                  },
+                  {
+                    "label": "Bearer token",
+                    "value": "token"
+                  }
+                ]
+              },
+              {
+                "key": "clientId",
+                "label": "Client ID",
+                "kind": "text",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ]
+              },
+              {
+                "key": "clientSecret",
+                "label": "Client secret",
+                "kind": "text",
+                "placeholder": "secret",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ],
+                "secret": true
+              },
+              {
+                "key": "oauth2ServerUri",
+                "label": "Token endpoint",
+                "kind": "text",
+                "placeholder": "<catalog URI>/v1/oauth/tokens",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ],
+                "description": "Leave blank for the catalog default."
+              },
+              {
+                "key": "oauth2Scope",
+                "label": "Scope",
+                "kind": "text",
+                "placeholder": "PRINCIPAL_ROLE:ALL",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ]
+              },
+              {
+                "key": "token",
+                "label": "Token",
+                "kind": "text",
+                "placeholder": "token",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "token"
+                  }
+                ],
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Object storage (for the data files)",
+            "fields": [
+              {
+                "key": "connectionRef",
+                "label": "Saved connection",
+                "kind": "connection-ref",
+                "accepts": [
+                  "s3"
+                ],
+                "description": "Pick a connection from the Connections folder to auto-fill the fields below.",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "accessKey",
+                "label": "S3 access key",
+                "kind": "text",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "Only when the catalog does not hand out storage credentials itself.",
+                "secret": true
+              },
+              {
+                "key": "secretKey",
+                "label": "S3 secret key",
+                "kind": "text",
+                "placeholder": "secret",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "secret": true
+              },
+              {
+                "key": "sessionToken",
+                "label": "S3 session token",
+                "kind": "text",
+                "placeholder": "token",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "secret": true
+              },
+              {
+                "key": "region",
+                "label": "S3 region",
+                "kind": "text",
+                "placeholder": "us-east-1",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "endpoint",
+                "label": "S3 endpoint",
+                "kind": "text",
+                "placeholder": "minio.internal:9000",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "For MinIO and other S3-compatible stores."
+              },
+              {
+                "key": "urlStyle",
+                "label": "S3 URL style",
+                "kind": "select",
+                "defaultValue": "",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "Default",
+                    "value": ""
+                  },
+                  {
+                    "label": "Path (host/bucket/key)",
+                    "value": "path"
+                  },
+                  {
+                    "label": "Virtual host (bucket.host/key)",
+                    "value": "vhost"
+                  }
+                ]
+              },
+              {
+                "key": "useSsl",
+                "label": "S3 use TLS",
+                "kind": "select",
+                "defaultValue": "",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "Default (from the endpoint scheme)",
+                    "value": ""
+                  },
+                  {
+                    "label": "Yes",
+                    "value": "true"
+                  },
+                  {
+                    "label": "No (local MinIO)",
+                    "value": "false"
+                  }
+                ]
               }
             ]
           }
@@ -31763,18 +32055,332 @@
         "kind": "sink",
         "label": "Apache Iceberg",
         "description": "Write a full Iceberg table (data/ + metadata/) via DuckDB v1.5",
-        "schemaSource": "upstream",
+        "schemaSource": "autodetect",
         "sections": [
           {
             "label": "Table",
             "fields": [
               {
+                "key": "catalog",
+                "label": "Where the table lives",
+                "kind": "select",
+                "defaultValue": "path",
+                "options": [
+                  {
+                    "label": "A table directory",
+                    "value": "path"
+                  },
+                  {
+                    "label": "A REST catalog",
+                    "value": "rest"
+                  }
+                ]
+              },
+              {
                 "key": "path",
-                "label": "Table path",
+                "label": "Table directory",
                 "kind": "text",
-                "required": true,
-                "placeholder": "s3://lake/orders/  or  /var/lakes/orders",
-                "description": "The Iceberg table root: a local directory or an s3:// URL backed by a Connection."
+                "placeholder": "/data/lake/orders",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "path"
+                },
+                "description": "The directory the table is written to (data/ and metadata/)."
+              },
+              {
+                "key": "catalogUri",
+                "label": "Catalog URI",
+                "kind": "text",
+                "placeholder": "https://catalog.example.com/api/catalog",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "The REST catalog endpoint."
+              },
+              {
+                "key": "warehouse",
+                "label": "Warehouse",
+                "kind": "text",
+                "placeholder": "warehouse",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "The warehouse the catalog serves, as it names it."
+              },
+              {
+                "key": "namespace",
+                "label": "Namespace",
+                "kind": "text",
+                "placeholder": "sales",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "Created when it does not exist."
+              },
+              {
+                "key": "table",
+                "label": "Table",
+                "kind": "text",
+                "placeholder": "orders",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "mode",
+                "label": "Write mode",
+                "kind": "select",
+                "defaultValue": "append",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "Append (create the table if missing)",
+                    "value": "append"
+                  },
+                  {
+                    "label": "Overwrite (drop and recreate)",
+                    "value": "overwrite"
+                  }
+                ],
+                "description": "Append matches columns by name. Overwrite drops the table and creates it again from this run's rows, as two catalog commits: the catalog cannot replace a table in one."
+              }
+            ]
+          },
+          {
+            "label": "Catalog sign-in",
+            "fields": [
+              {
+                "key": "authType",
+                "label": "Authentication",
+                "kind": "select",
+                "defaultValue": "none",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "None",
+                    "value": "none"
+                  },
+                  {
+                    "label": "OAuth2 client credentials",
+                    "value": "oauth2"
+                  },
+                  {
+                    "label": "Bearer token",
+                    "value": "token"
+                  }
+                ]
+              },
+              {
+                "key": "clientId",
+                "label": "Client ID",
+                "kind": "text",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ]
+              },
+              {
+                "key": "clientSecret",
+                "label": "Client secret",
+                "kind": "text",
+                "placeholder": "secret",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ],
+                "secret": true
+              },
+              {
+                "key": "oauth2ServerUri",
+                "label": "Token endpoint",
+                "kind": "text",
+                "placeholder": "<catalog URI>/v1/oauth/tokens",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ],
+                "description": "Leave blank for the catalog default."
+              },
+              {
+                "key": "oauth2Scope",
+                "label": "Scope",
+                "kind": "text",
+                "placeholder": "PRINCIPAL_ROLE:ALL",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "oauth2"
+                  }
+                ]
+              },
+              {
+                "key": "token",
+                "label": "Token",
+                "kind": "text",
+                "placeholder": "token",
+                "visibleWhen": [
+                  {
+                    "key": "catalog",
+                    "equals": "rest"
+                  },
+                  {
+                    "key": "authType",
+                    "equals": "token"
+                  }
+                ],
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Object storage (for the data files)",
+            "fields": [
+              {
+                "key": "connectionRef",
+                "label": "Saved connection",
+                "kind": "connection-ref",
+                "accepts": [
+                  "s3"
+                ],
+                "description": "Pick a connection from the Connections folder to auto-fill the fields below.",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "accessKey",
+                "label": "S3 access key",
+                "kind": "text",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "Only when the catalog does not hand out storage credentials itself.",
+                "secret": true
+              },
+              {
+                "key": "secretKey",
+                "label": "S3 secret key",
+                "kind": "text",
+                "placeholder": "secret",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "secret": true
+              },
+              {
+                "key": "sessionToken",
+                "label": "S3 session token",
+                "kind": "text",
+                "placeholder": "token",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "secret": true
+              },
+              {
+                "key": "region",
+                "label": "S3 region",
+                "kind": "text",
+                "placeholder": "us-east-1",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                }
+              },
+              {
+                "key": "endpoint",
+                "label": "S3 endpoint",
+                "kind": "text",
+                "placeholder": "minio.internal:9000",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "description": "For MinIO and other S3-compatible stores."
+              },
+              {
+                "key": "urlStyle",
+                "label": "S3 URL style",
+                "kind": "select",
+                "defaultValue": "",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "Default",
+                    "value": ""
+                  },
+                  {
+                    "label": "Path (host/bucket/key)",
+                    "value": "path"
+                  },
+                  {
+                    "label": "Virtual host (bucket.host/key)",
+                    "value": "vhost"
+                  }
+                ]
+              },
+              {
+                "key": "useSsl",
+                "label": "S3 use TLS",
+                "kind": "select",
+                "defaultValue": "",
+                "visibleWhen": {
+                  "key": "catalog",
+                  "equals": "rest"
+                },
+                "options": [
+                  {
+                    "label": "Default (from the endpoint scheme)",
+                    "value": ""
+                  },
+                  {
+                    "label": "Yes",
+                    "value": "true"
+                  },
+                  {
+                    "label": "No (local MinIO)",
+                    "value": "false"
+                  }
+                ]
               }
             ]
           }

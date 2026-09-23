@@ -363,6 +363,53 @@ jobs:
           DUCKLE_PG_PASS: pgtest
         run: cargo test -p duckle-duckdb-engine --test postgres_cdc
 
+  # Live Iceberg REST catalog tests: the catalog the Iceberg project itself
+  # tests against, with its warehouse on MinIO. Started with docker run rather
+  # than as service containers, because a service cannot be given a command
+  # and MinIO needs `server /data`.
+  iceberg-rest-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install DuckDB CLI
+        run: |
+          set -e
+          curl -L -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          unzip -o duckdb.zip -d "$RUNNER_TEMP/duckdb"
+          echo "DUCKLE_DUCKDB_BIN=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
+      - name: Pre-install extensions
+        run: |
+          "$DUCKLE_DUCKDB_BIN" :memory: -c "INSTALL iceberg; INSTALL httpfs;"
+      - name: Start MinIO and the Iceberg REST catalog
+        run: |
+          set -e
+          docker network create ice
+          docker run -d --name minio --network ice -p 9000:9000 \
+            -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=password \
+            minio/minio server /data
+          for i in $(seq 1 30); do curl -sf http://localhost:9000/minio/health/live && break; sleep 2; done
+          docker run --rm --network ice --entrypoint sh minio/mc -c \
+            "mc alias set m http://minio:9000 admin password && mc mb m/warehouse"
+          docker run -d --name rest --network ice -p 8181:8181 \
+            -e AWS_ACCESS_KEY_ID=admin -e AWS_SECRET_ACCESS_KEY=password -e AWS_REGION=us-east-1 \
+            -e CATALOG_WAREHOUSE=s3://warehouse/ \
+            -e CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO \
+            -e CATALOG_S3_ENDPOINT=http://minio:9000 -e CATALOG_S3_PATH__STYLE__ACCESS=true \
+            apache/iceberg-rest-fixture
+          for i in $(seq 1 60); do curl -sf http://localhost:8181/v1/config && break; sleep 2; done
+          curl -sf http://localhost:8181/v1/config > /dev/null
+      - name: Run Iceberg REST tests
+        env:
+          DUCKLE_ICEBERG_REST_URI: http://localhost:8181
+          DUCKLE_ICEBERG_WAREHOUSE: warehouse
+          DUCKLE_ICEBERG_S3_ENDPOINT: localhost:9000
+          DUCKLE_ICEBERG_S3_KEY: admin
+          DUCKLE_ICEBERG_S3_SECRET: password
+        run: cargo test -p duckle-duckdb-engine --test iceberg_rest
+
   # Live MySQL integration tests (also covers MariaDB, same wire).
   mysql-integration:
     runs-on: ubuntu-latest

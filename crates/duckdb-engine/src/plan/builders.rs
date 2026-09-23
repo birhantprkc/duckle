@@ -22,7 +22,7 @@ pub fn source_select_for_format(format: &str, props: &JsonValue) -> Option<Strin
         "avro" => build_avro_source(props),
         "inline" => build_inline_source(props),
         "filelist" => return build_filelist_source(props).ok(),
-        "iceberg" => build_iceberg_source(props),
+        "iceberg" => return build_iceberg_source(props).ok(),
         "delta" => build_delta_source(props),
         "spatial" => build_spatial_source(props),
         "gdb" => build_gdb_source(props),
@@ -259,7 +259,7 @@ pub(crate) fn build_view_sql(
         "src.inline" => Ok(build_inline_source(props)),
         "src.filelist" => build_filelist_source(props),
         "src.artifact" => Ok(build_artifact_source(props)),
-        "src.iceberg" => Ok(build_iceberg_source(props)),
+        "src.iceberg" => build_iceberg_source(props),
         "src.delta" => Ok(build_delta_source(props)),
         "src.spatial" => Ok(build_spatial_source(props)),
         "src.gdb" => Ok(build_gdb_source(props)),
@@ -6042,6 +6042,10 @@ pub(crate) fn attach_prelude(component_id: &str, props: &JsonValue) -> String {
         // race on the cached extension file and intermittently fail.
         "src.avro" => return "LOAD avro; ".into(),
         "src.excel" => return "LOAD excel; ".into(),
+        "src.iceberg" | "snk.iceberg" if is_iceberg_rest(props) => {
+            let alias = if component_id == "src.iceberg" { "duckle_src" } else { "duckle_dst" };
+            return iceberg_rest_attach(props, alias);
+        }
         "src.iceberg" | "snk.iceberg" => return "LOAD iceberg; ".into(),
         "src.delta" => return "LOAD delta; ".into(),
         // Vector Similarity Search uses the vss extension's array_*
@@ -6960,16 +6964,108 @@ pub(crate) fn build_excel_sink(props: &JsonValue, from_view: &str) -> String {
     )
 }
 
-/// Iceberg sink: COPY ... TO '<path>' (FORMAT 'iceberg'). DuckDB
-/// v1.5+ writes a full Iceberg table (data/ + metadata/) at the
-/// given path. Read-back via src.iceberg.
-pub(crate) fn build_iceberg_sink(props: &JsonValue, from_view: &str) -> String {
-    let path = string_prop(props, "path").unwrap_or_default();
-    format!(
-        "COPY (SELECT * FROM {}) TO '{}' (FORMAT 'iceberg')",
-        quote_ident(from_view),
-        sql_escape(&path)
-    )
+/// Iceberg sink. With a path: COPY ... TO '<path>' (FORMAT 'iceberg'), which
+/// DuckDB v1.5+ writes as a full table (data/ + metadata/). Through a REST
+/// catalog: into the attached catalog (see `iceberg_rest_attach`), creating the
+/// namespace and table when missing.
+pub(crate) fn build_iceberg_sink(props: &JsonValue, from_view: &str) -> Result<String, String> {
+    let from = quote_ident(from_view);
+    if is_iceberg_rest(props) {
+        let (namespace, table) = iceberg_rest_table(props)?;
+        let qualified = format!("duckle_dst.{}.{}", quote_ident(&namespace), quote_ident(&table));
+        let schema = format!("CREATE SCHEMA IF NOT EXISTS duckle_dst.{}; ", quote_ident(&namespace));
+        let mode = string_prop(props, "mode").unwrap_or_default().to_ascii_lowercase();
+        return Ok(match mode.as_str() {
+            // The extension has no CREATE OR REPLACE, and says so.
+            "overwrite" => format!(
+                "{schema}DROP TABLE IF EXISTS {qualified}; CREATE TABLE {qualified} AS SELECT * FROM {from}"
+            ),
+            // Append is the default: a misconfigured pipeline should add rows,
+            // not drop a table. The empty CREATE makes a missing table without
+            // writing, so the INSERT is the only write whether or not it existed.
+            "" | "append" => format!(
+                "{schema}CREATE TABLE IF NOT EXISTS {qualified} AS SELECT * FROM {from} WHERE false; \
+                 INSERT INTO {qualified} BY NAME SELECT * FROM {from}"
+            ),
+            other => return Err(format!("Iceberg sink: mode '{other}' is not one of append, overwrite")),
+        });
+    }
+    // With no path the COPY wrote the table into whatever directory the process
+    // happened to be in, and reported success.
+    let path = string_prop(props, "path")
+        .filter(|p| !p.trim().is_empty())
+        .ok_or_else(|| {
+            "Iceberg sink: path required (the table directory), or set catalog to rest".to_string()
+        })?;
+    Ok(format!("COPY (SELECT * FROM {}) TO '{}' (FORMAT 'iceberg')", from, sql_escape(&path)))
+}
+
+/// Whether an Iceberg node goes through a REST catalog rather than a path.
+pub(crate) fn is_iceberg_rest(props: &JsonValue) -> bool {
+    string_prop(props, "catalog").is_some_and(|c| c.eq_ignore_ascii_case("rest"))
+}
+
+/// The namespace and table a REST-catalog node names, both required.
+fn iceberg_rest_table(props: &JsonValue) -> Result<(String, String), String> {
+    let get = |k: &str| string_prop(props, k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    for key in ["catalogUri", "warehouse"] {
+        if get(key).is_none() {
+            return Err(format!("Iceberg REST catalog: {key} required"));
+        }
+    }
+    let namespace = get("namespace").ok_or("Iceberg REST catalog: namespace required")?;
+    let table = get("table").ok_or("Iceberg REST catalog: table required")?;
+    Ok((namespace, table))
+}
+
+/// LOAD, secrets and ATTACH for a REST catalog, as `alias`.
+///
+/// Two secrets, for two different things. The catalog's own credentials -
+/// OAuth2 client credentials or a bearer token - go in an ICEBERG secret the
+/// ATTACH names. The data files live in object storage, and a catalog that does
+/// not vend credentials needs an S3 secret for them; that is built by the same
+/// `secret_statement` every S3 node uses, from the same keys, so a saved S3
+/// connection supplies it too. The catalog address is `catalogUri`, never
+/// `endpoint`, which is the storage endpoint in those same keys.
+pub(crate) fn iceberg_rest_attach(props: &JsonValue, alias: &str) -> String {
+    let get = |k: &str| string_prop(props, k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let mut sql = String::from("LOAD iceberg; LOAD httpfs; ");
+    if let Some(storage) = crate::secret_statement("s3", &format!("{alias}_store"), props) {
+        sql.push_str(&storage);
+        sql.push(' ');
+    }
+    let catalog_secret = format!("{alias}_catalog");
+    let auth = match get("authType").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "oauth2" => {
+            let mut parts = vec![
+                "TYPE iceberg".to_string(),
+                format!("CLIENT_ID '{}'", sql_escape(&get("clientId").unwrap_or_default())),
+                format!("CLIENT_SECRET '{}'", sql_escape(&get("clientSecret").unwrap_or_default())),
+            ];
+            if let Some(uri) = get("oauth2ServerUri") {
+                parts.push(format!("OAUTH2_SERVER_URI '{}'", sql_escape(&uri)));
+            }
+            if let Some(scope) = get("oauth2Scope") {
+                parts.push(format!("OAUTH2_SCOPE '{}'", sql_escape(&scope)));
+            }
+            sql.push_str(&format!("CREATE OR REPLACE SECRET {catalog_secret} ({}); ", parts.join(", ")));
+            format!("SECRET {catalog_secret}")
+        }
+        "token" => {
+            sql.push_str(&format!(
+                "CREATE OR REPLACE SECRET {catalog_secret} (TYPE iceberg, TOKEN '{}'); ",
+                sql_escape(&get("token").unwrap_or_default())
+            ));
+            format!("SECRET {catalog_secret}")
+        }
+        _ => "AUTHORIZATION_TYPE 'none'".to_string(),
+    };
+    sql.push_str(&format!(
+        "ATTACH '{}' AS {alias} (TYPE iceberg, ENDPOINT '{}', {auth}); ",
+        sql_escape(&get("warehouse").unwrap_or_default()),
+        sql_escape(&get("catalogUri").unwrap_or_default()),
+    ));
+    sql
 }
 
 /// Geospatial sink via the spatial extension's GDAL writer. The form's
@@ -9254,9 +9350,15 @@ pub(crate) fn build_filelist_source(props: &JsonValue) -> Result<String, String>
 /// Iceberg source via the DuckDB iceberg extension's `iceberg_scan`.
 /// The `path` is the iceberg table location (a local directory or an
 /// `s3://...` URL backed by a cloud SECRET created elsewhere).
-pub(crate) fn build_iceberg_source(props: &JsonValue) -> String {
+pub(crate) fn build_iceberg_source(props: &JsonValue) -> Result<String, String> {
+    // Through a REST catalog the table is read from the attached catalog, which
+    // `iceberg_rest_attach` puts in the stage prelude as duckle_src.
+    if is_iceberg_rest(props) {
+        let (namespace, table) = iceberg_rest_table(props)?;
+        return Ok(format!("SELECT * FROM duckle_src.{}.{}", quote_ident(&namespace), quote_ident(&table)));
+    }
     let path = string_prop(props, "path").unwrap_or_default();
-    format!("SELECT * FROM iceberg_scan('{}')", sql_escape(&path))
+    Ok(format!("SELECT * FROM iceberg_scan('{}')", sql_escape(&path)))
 }
 
 /// Delta Lake source via the DuckDB delta extension's `delta_scan`.
@@ -9898,7 +10000,7 @@ pub(crate) fn build_sink_sql(
             Ok(build_excel_sink(props, from_view))
         }
         "snk.spatial" => Ok(build_spatial_sink(props, from_view)),
-        "snk.iceberg" => Ok(build_iceberg_sink(props, from_view)),
+        "snk.iceberg" => build_iceberg_sink(props, from_view).map_err(EngineError::Config),
         other => Err(EngineError::Unsupported(format!(
             "Sink '{}' is not yet implemented",
             other

@@ -2152,7 +2152,95 @@ function synthPostgresCdc(comp: ComponentDef): ComponentManifest {
     ]);
 }
 
+/**
+ * src.iceberg / snk.iceberg: a table directory, or a table in a REST catalog
+ * (Polaris, Lakekeeper, Nessie, Gravitino and the Iceberg REST fixture). The
+ * catalog's own credentials and the object store's are separate: `catalogUri`
+ * is the catalog, `endpoint` belongs to the S3 keys every S3 node shares, so a
+ * saved S3 connection fills them.
+ */
+function icebergSections(sink: boolean): FormSection[] {
+    const rest: FieldCondition = { key: 'catalog', equals: 'rest' };
+    const oauth: FieldCondition[] = [rest, { key: 'authType', equals: 'oauth2' }];
+    const token: FieldCondition[] = [rest, { key: 'authType', equals: 'token' }];
+    return [
+        {
+            label: 'Table',
+            fields: [
+                {
+                    key: 'catalog', label: 'Where the table lives', kind: 'select', defaultValue: 'path',
+                    options: [
+                        { label: 'A table directory', value: 'path' },
+                        { label: 'A REST catalog', value: 'rest' },
+                    ],
+                },
+                { key: 'path', label: 'Table directory', kind: 'text', placeholder: '/data/lake/orders', visibleWhen: { key: 'catalog', equals: 'path' }, description: sink ? 'The directory the table is written to (data/ and metadata/).' : 'The table directory, holding metadata/.' },
+                { key: 'catalogUri', label: 'Catalog URI', kind: 'text', placeholder: 'https://catalog.example.com/api/catalog', visibleWhen: rest, description: 'The REST catalog endpoint.' },
+                { key: 'warehouse', label: 'Warehouse', kind: 'text', placeholder: 'warehouse', visibleWhen: rest, description: 'The warehouse the catalog serves, as it names it.' },
+                { key: 'namespace', label: 'Namespace', kind: 'text', placeholder: 'sales', visibleWhen: rest, description: sink ? 'Created when it does not exist.' : undefined },
+                { key: 'table', label: 'Table', kind: 'text', placeholder: 'orders', visibleWhen: rest },
+                ...(sink
+                    ? [{
+                        key: 'mode', label: 'Write mode', kind: 'select' as const, defaultValue: 'append', visibleWhen: rest,
+                        options: [
+                            { label: 'Append (create the table if missing)', value: 'append' },
+                            { label: 'Overwrite (drop and recreate)', value: 'overwrite' },
+                        ],
+                        description: "Append matches columns by name. Overwrite drops the table and creates it again from this run's rows, as two catalog commits: the catalog cannot replace a table in one.",
+                    }]
+                    : []),
+            ],
+        },
+        {
+            label: 'Catalog sign-in',
+            fields: [
+                {
+                    key: 'authType', label: 'Authentication', kind: 'select', defaultValue: 'none', visibleWhen: rest,
+                    options: [
+                        { label: 'None', value: 'none' },
+                        { label: 'OAuth2 client credentials', value: 'oauth2' },
+                        { label: 'Bearer token', value: 'token' },
+                    ],
+                },
+                { key: 'clientId', label: 'Client ID', kind: 'text', visibleWhen: oauth },
+                { key: 'clientSecret', label: 'Client secret', kind: 'text', placeholder: 'secret', visibleWhen: oauth },
+                { key: 'oauth2ServerUri', label: 'Token endpoint', kind: 'text', placeholder: '<catalog URI>/v1/oauth/tokens', visibleWhen: oauth, description: 'Leave blank for the catalog default.' },
+                { key: 'oauth2Scope', label: 'Scope', kind: 'text', placeholder: 'PRINCIPAL_ROLE:ALL', visibleWhen: oauth },
+                { key: 'token', label: 'Token', kind: 'text', placeholder: 'token', visibleWhen: token },
+            ],
+        },
+        {
+            label: 'Object storage (for the data files)',
+            fields: [
+                { ...connectionRefField('s3'), visibleWhen: rest },
+                { key: 'accessKey', label: 'S3 access key', kind: 'text', visibleWhen: rest, description: 'Only when the catalog does not hand out storage credentials itself.' },
+                { key: 'secretKey', label: 'S3 secret key', kind: 'text', placeholder: 'secret', visibleWhen: rest },
+                { key: 'sessionToken', label: 'S3 session token', kind: 'text', placeholder: 'token', visibleWhen: rest },
+                { key: 'region', label: 'S3 region', kind: 'text', placeholder: 'us-east-1', visibleWhen: rest },
+                { key: 'endpoint', label: 'S3 endpoint', kind: 'text', placeholder: 'minio.internal:9000', visibleWhen: rest, description: 'For MinIO and other S3-compatible stores.' },
+                {
+                    key: 'urlStyle', label: 'S3 URL style', kind: 'select', defaultValue: '', visibleWhen: rest,
+                    options: [
+                        { label: 'Default', value: '' },
+                        { label: 'Path (host/bucket/key)', value: 'path' },
+                        { label: 'Virtual host (bucket.host/key)', value: 'vhost' },
+                    ],
+                },
+                {
+                    key: 'useSsl', label: 'S3 use TLS', kind: 'select', defaultValue: '', visibleWhen: rest,
+                    options: [
+                        { label: 'Default (from the endpoint scheme)', value: '' },
+                        { label: 'Yes', value: 'true' },
+                        { label: 'No (local MinIO)', value: 'false' },
+                    ],
+                },
+            ],
+        },
+    ];
+}
+
 function synthLakehouseSource(comp: ComponentDef): ComponentManifest {
+    if (comp.id === 'src.iceberg') return base(comp, icebergSections(false));
     if (comp.id === 'src.ducklake.changes') {
         // DuckLake change-data-feed: reads table_changes() incrementally,
         // tracking the consumed snapshot in workspace state.
@@ -2253,6 +2341,7 @@ function synthLakehouseSource(comp: ComponentDef): ComponentManifest {
 }
 
 function synthLakehouseSink(comp: ComponentDef): ComponentManifest {
+    if (comp.id === 'snk.iceberg') return base(comp, icebergSections(true));
     if (comp.id === 'snk.delta') {
         // Append-only: DuckDB's delta extension appends to a table but cannot
         // replace one, so there is no overwrite mode to offer.
