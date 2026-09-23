@@ -58,9 +58,9 @@ pub fn is_secret_prop_key(key: &str) -> bool {
 /// What a lowercased property key contains when it holds a credential. Public
 /// so the build bundler refines this list rather than keeping its own copy:
 /// its copy had lost `passphrase`, and bundled an SSH key's passphrase as typed.
-pub const SECRET_NEEDLES: [&str; 17] = [
+pub const SECRET_NEEDLES: [&str; 18] = [
     "password", "passwd", "passphrase", "secret", "token", "apikey", "api_key",
-    "privatekey", "private_key", "accesskey", "access_key",
+    "privatekey", "private_key", "accesskey", "access_key", "accountkey",
     "clientsecret", "client_secret", "connectionstring", "connection_string",
     "sas", "credential",
 ];

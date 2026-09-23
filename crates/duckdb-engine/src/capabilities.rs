@@ -140,8 +140,9 @@ fn port_of(c: &Value, side: &str, ty: &str) -> bool {
 
 /// Credential-shaped property names, matched case-insensitively on a substring
 /// so `sslKeyPassword` counts as much as `password`.
-const CREDENTIAL_HINTS: &[&str] =
-    &["password", "secret", "token", "apikey", "accesskey", "privatekey", "credentials"];
+const CREDENTIAL_HINTS: &[&str] = &[
+    "password", "secret", "token", "apikey", "accesskey", "accountkey", "privatekey", "credentials",
+];
 
 pub fn derive(c: &Value) -> Capabilities {
     let keys = field_keys(c);

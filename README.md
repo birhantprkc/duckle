@@ -4146,6 +4146,24 @@ A **REST** connection is the exception to auto-fill, because it exists to be sha
 
 The **Copy SQL** / **Export SQL** output is display-only and never executed. Secret values (passwords, tokens, keys, connection strings) are replaced with named placeholders such as `${DUCKLE_PASSWORD}`, so the exported script stays valid and is safe to share - substitute the real value at run time. To emit the real credentials instead (so the script runs unchanged), set the environment variable `DUCKLE_EXPORT_INCLUDE_SECRETS=1`; the output then contains live secrets and should be handled accordingly.
 
+### Cloud storage with no key at all
+
+The safest credential is the one that is not in the pipeline. On S3, MinIO, R2,
+B2 and Azure Blob, set **Sign in with** to the environment and the run uses the
+identity it already has where it runs:
+
+- **S3 family:** an instance or container role, IRSA on Kubernetes, SSO, an AWS
+  profile or `AWS_*` variables (DuckDB's AWS credential chain). A run with no
+  identity stops before it reads anything, not with a 403 halfway through.
+- **Azure Blob:** a managed or workload identity, an Azure CLI login or
+  `AZURE_*` variables. Name the storage account; there is no key to give.
+
+GCS stays on HMAC keys: DuckDB 1.5.5 has no Google credential chain.
+
+The S3 path is tested live: the same node fails with no identity in the
+environment and reads the object once one is there. The Azure path is checked
+as far as the secret DuckDB accepts; signing in needs a real Azure identity.
+
 ---
 
 ## Context variables

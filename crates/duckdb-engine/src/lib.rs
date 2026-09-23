@@ -7012,24 +7012,33 @@ pub(crate) fn secret_statement(
         .collect::<String>();
     match format {
         "s3" => {
-            let key = get("accessKey")?;
-            let sec = get("secretKey")?;
-            let region = get("region").unwrap_or("us-east-1");
-            let session = get("sessionToken");
             // S3-compatible (MinIO / R2 / B2) sets endpoint + url_style +
             // use_ssl. Empty / missing values are skipped so plain AWS S3
             // keeps its defaults.
             let endpoint = get("endpoint").filter(|s| !s.is_empty());
             let url_style = get("urlStyle").filter(|s| !s.is_empty());
             let use_ssl = get("useSsl").filter(|s| !s.is_empty());
-            let mut parts = vec![
-                "TYPE S3".to_string(),
-                format!("KEY_ID '{}'", sql_escape(key)),
-                format!("SECRET '{}'", sql_escape(sec)),
-                format!("REGION '{}'", sql_escape(region)),
-            ];
-            if let Some(s) = session {
-                parts.push(format!("SESSION_TOKEN '{}'", sql_escape(s)));
+            let mut parts = vec!["TYPE S3".to_string()];
+            if get("cloudAuth") == Some("environment") {
+                // No key in the pipeline: the AWS chain finds one where the run
+                // is - env vars, a profile, SSO, IRSA, an instance or container
+                // role. It fails at create when there is none, so a run with no
+                // identity stops there rather than as a 403 on the first read.
+                // Keys still in the form are not sent: they would win.
+                parts.push("PROVIDER credential_chain".to_string());
+                if let Some(r) = get("region").map(str::trim).filter(|s| !s.is_empty()) {
+                    parts.push(format!("REGION '{}'", sql_escape(r)));
+                }
+            } else {
+                let key = get("accessKey")?;
+                let sec = get("secretKey")?;
+                let region = get("region").unwrap_or("us-east-1");
+                parts.push(format!("KEY_ID '{}'", sql_escape(key)));
+                parts.push(format!("SECRET '{}'", sql_escape(sec)));
+                parts.push(format!("REGION '{}'", sql_escape(region)));
+                if let Some(s) = get("sessionToken") {
+                    parts.push(format!("SESSION_TOKEN '{}'", sql_escape(s)));
+                }
             }
             if let Some(e) = endpoint {
                 parts.push(format!("ENDPOINT '{}'", sql_escape(e)));
@@ -7090,6 +7099,17 @@ pub(crate) fn secret_statement(
         }
         "azureblob" => {
             let account = get("accountName")?;
+            if get("cloudAuth") == Some("environment") {
+                // A managed identity, workload identity, the Azure CLI or the
+                // environment, by DuckDB's default chain. Never without the
+                // account: that secret is an INTERNAL error at the first read.
+                let account = Some(account.trim()).filter(|a| !a.is_empty())?;
+                return Some(format!(
+                    "CREATE OR REPLACE SECRET secret_{} (TYPE AZURE, PROVIDER credential_chain, ACCOUNT_NAME '{}');",
+                    sane,
+                    sql_escape(account)
+                ));
+            }
             let key = get("accountKey")?;
             Some(format!(
                 "CREATE OR REPLACE SECRET secret_{} (TYPE AZURE, CONNECTION_STRING 'DefaultEndpointsProtocol=https;AccountName={};AccountKey={};EndpointSuffix=core.windows.net');",
@@ -8561,7 +8581,7 @@ mod sql_literal_tests {
 
 #[cfg(test)]
 mod cloud_secret_tests {
-    use super::secret_statement;
+    use super::{secret_family, secret_statement, JsonValue};
 
     #[test]
     fn a_gcs_bucket_keeps_the_region_it_was_given() {
@@ -8615,6 +8635,116 @@ mod cloud_secret_tests {
         assert!(!blank.contains("REGION"), "got: {blank}");
     }
 
+    #[test]
+    fn a_keyless_s3_node_takes_its_credentials_from_the_environment() {
+        // An IAM role, an instance profile, IRSA, SSO or an AWS profile: no key
+        // in the pipeline at all, and the secret is made all the same.
+        let s = secret_statement(
+            "s3",
+            "src_s3_1",
+            &serde_json::json!({ "cloudAuth": "environment", "region": "eu-west-1" }),
+        )
+        .expect("no keys are needed");
+        assert!(s.contains("PROVIDER credential_chain"), "got: {s}");
+        assert!(s.contains("REGION 'eu-west-1'"), "got: {s}");
+
+        // Keys left in the form from before are not sent alongside: the choice
+        // was the environment, and a stale key would quietly win over it.
+        let stale = secret_statement(
+            "s3",
+            "src_s3_1",
+            &serde_json::json!({ "cloudAuth": "environment", "accessKey": "k", "secretKey": "s" }),
+        )
+        .expect("makes one");
+        assert!(!stale.contains("KEY_ID"), "got: {stale}");
+
+        // No region given, none is invented: the chain finds the environment's
+        // own, where the key path defaults to us-east-1.
+        let bare = secret_statement("s3", "src_s3_1", &serde_json::json!({ "cloudAuth": "environment" }))
+            .expect("makes one");
+        assert!(!bare.contains("REGION"), "got: {bare}");
+
+        // S3-compatible stores keep their endpoint.
+        let minio = secret_statement(
+            "s3",
+            "src_minio_1",
+            &serde_json::json!({ "cloudAuth": "environment", "endpoint": "localhost:9000", "urlStyle": "path", "useSsl": "false" }),
+        )
+        .expect("makes one");
+        assert!(minio.contains("ENDPOINT 'localhost:9000'"), "got: {minio}");
+        assert!(minio.contains("URL_STYLE 'path'"), "got: {minio}");
+        assert!(minio.contains("USE_SSL false"), "got: {minio}");
+    }
+
+    #[test]
+    fn a_keyless_azure_node_signs_in_as_its_identity() {
+        // A managed identity, workload identity, the Azure CLI or the
+        // environment: DuckDB's default chain, for the account named.
+        let s = secret_statement(
+            "azureblob",
+            "src_az_1",
+            &serde_json::json!({ "cloudAuth": "environment", "accountName": "acct" }),
+        )
+        .expect("no key is needed");
+        assert!(s.contains("TYPE AZURE"), "got: {s}");
+        assert!(s.contains("PROVIDER credential_chain"), "got: {s}");
+        assert!(s.contains("ACCOUNT_NAME 'acct'"), "got: {s}");
+        assert!(!s.contains("AccountKey"), "got: {s}");
+
+        // Without an account DuckDB fails that secret with an INTERNAL error at
+        // the first read. None instead, which reads "No valid Azure credentials"
+        // (both measured on the 1.5.5 CLI).
+        assert!(
+            secret_statement("azureblob", "src_az_1", &serde_json::json!({ "cloudAuth": "environment" }))
+                .is_none()
+        );
+    }
+
+    /// Every cloud storage form, filled in, makes the secret its runs need.
+    ///
+    /// The Azure form offered an access key and a secret key, and the Azure
+    /// secret is made from an account name and an account key. Nothing mapped
+    /// one onto the other, so a node set up from its own form ran with no
+    /// credentials at all; only a saved connection, which does carry the
+    /// account fields, ever worked. Read from the generated catalog, so it is
+    /// the form as the editor draws it that is checked.
+    #[test]
+    fn every_cloud_form_offers_the_fields_its_secret_is_made_from() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("duckle-mcp")
+            .join("catalog.json");
+        let catalog: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("catalog.json")).expect("JSON");
+        let mut checked = Vec::new();
+        for c in catalog["components"].as_array().expect("components") {
+            let id = c["id"].as_str().unwrap_or_default();
+            let bare = id.split_once('.').map(|(_, f)| f).unwrap_or(id);
+            let family = secret_family(bare);
+            if !matches!(family, "s3" | "gcs" | "azureblob") {
+                continue;
+            }
+            // Every field the form declares, filled in; the auth choice left
+            // at its default, which is the keys.
+            let mut props = serde_json::Map::new();
+            for s in c["manifest"]["sections"].as_array().into_iter().flatten() {
+                for f in s["fields"].as_array().into_iter().flatten() {
+                    if let Some(k) = f["key"].as_str().filter(|k| *k != "cloudAuth") {
+                        props.insert(k.to_string(), JsonValue::String("x".into()));
+                    }
+                }
+            }
+            assert!(
+                secret_statement(family, "n", &JsonValue::Object(props)).is_some(),
+                "{id}: filling in every field its form offers makes no {family} secret"
+            );
+            checked.push(id.to_string());
+        }
+        // Not vacuous: the families are there to be checked.
+        for id in ["src.s3", "snk.s3", "src.gcs", "src.azureblob", "snk.azureblob", "src.minio"] {
+            assert!(checked.iter().any(|c| c == id), "{id} was not checked: {checked:?}");
+        }
+    }
 }
 
 #[cfg(test)]

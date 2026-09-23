@@ -270,6 +270,7 @@ integration:minio:
     - export DUCKLE_DUCKDB_BIN=/tmp/duckdb/duckdb
     - export DUCKLE_MINIO_HOST=minio DUCKLE_MINIO_PORT=9000 DUCKLE_MINIO_BUCKET=duckle-test DUCKLE_MINIO_ACCESS_KEY=minioadmin DUCKLE_MINIO_SECRET_KEY=minioadmin
     - cargo test -p duckle-duckdb-engine --test execution -- minio_
+    - cargo test -p duckle-duckdb-engine --test keyless_cloud
   rules:
     - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "main"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"

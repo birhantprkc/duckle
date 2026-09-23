@@ -166,6 +166,51 @@ const writeModeField = (): Field => ({
     options: [{ label: 'Overwrite', value: 'overwrite' }],
 });
 
+// How a cloud storage node signs in: the keys typed here, or, for S3, the
+// S3-compatible stores and Azure, whatever identity the run has where it runs,
+// with no key in the pipeline. GCS stays keys only: DuckDB 1.5.5 reads it with
+// HMAC keys and has no Google credential chain (its "chain" for GCS is AWS's).
+// Azure's secret is made from an account name and key (lib.rs secret_statement),
+// which is what this offers it; the access/secret pair it used to get was never read.
+export const storageAuthFields = (componentId: string, withSessionToken: boolean): Field[] => {
+    const family = componentId.split('.')[1];
+    const azure = family === 'azureblob';
+    if (family === 'gcs') {
+        return [
+            { key: 'accessKey', label: 'Access key', kind: 'text' },
+            { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••' },
+            ...(withSessionToken ? [{ key: 'sessionToken', label: 'Session token', kind: 'text' } as Field] : []),
+        ];
+    }
+    const keysOnly = { visibleWhen: { key: 'cloudAuth', equals: 'keys' } };
+    const signIn: Field = {
+        key: 'cloudAuth',
+        label: 'Sign in with',
+        kind: 'select',
+        defaultValue: 'keys',
+        options: [
+            { label: azure ? 'Account key' : 'Access keys', value: 'keys' },
+            { label: azure ? 'Managed identity / Azure CLI' : 'IAM role / environment', value: 'environment' },
+        ],
+        description: azure
+            ? 'The environment signs in as the identity the run has where it runs - a managed or workload identity, an Azure CLI login, or AZURE_* variables - with no key in the pipeline.'
+            : 'The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything.',
+    };
+    if (azure) {
+        return [
+            { key: 'accountName', label: 'Storage account', kind: 'text', placeholder: 'mystorageaccount' },
+            signIn,
+            { key: 'accountKey', label: 'Account key', kind: 'text', placeholder: '••••••••', ...keysOnly },
+        ];
+    }
+    return [
+        signIn,
+        { key: 'accessKey', label: 'Access key', kind: 'text', ...keysOnly },
+        { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••', ...keysOnly },
+        ...(withSessionToken ? [{ key: 'sessionToken', label: 'Session token', kind: 'text', ...keysOnly } as Field] : []),
+    ];
+};
+
 // Validate-before-insert / dead-letter for DB sinks (#101): split rows that
 // cannot be cast to the declared column types off to a file instead of failing
 // the whole load. Needs a declared schema on the node.
@@ -4296,9 +4341,7 @@ function synthStorageSource(comp: ComponentDef): ComponentManifest {
         {
             label: 'Credentials',
             fields: [
-                { key: 'accessKey', label: 'Access key', kind: 'text' },
-                { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••' },
-                { key: 'sessionToken', label: 'Session token', kind: 'text' },
+                ...storageAuthFields(comp.id, true),
                 {
                     key: 'connectionRef',
                     label: 'Or use saved connection',
@@ -4376,8 +4419,7 @@ function synthStorageSink(comp: ComponentDef): ComponentManifest {
             {
                 label: 'Credentials',
                 fields: [
-                    { key: 'accessKey', label: 'Access key', kind: 'text' },
-                    { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••' },
+                    ...storageAuthFields(comp.id, false),
                     {
                         key: 'connectionRef',
                         label: 'Or use saved connection',

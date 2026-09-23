@@ -8058,9 +8058,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -8068,6 +8089,10 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -8607,22 +8632,37 @@
             "label": "Credentials",
             "fields": [
               {
-                "key": "accessKey",
-                "label": "Access key",
+                "key": "accountName",
+                "label": "Storage account",
                 "kind": "text",
-                "secret": true
+                "placeholder": "mystorageaccount"
               },
               {
-                "key": "secretKey",
-                "label": "Secret key",
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Account key",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "Managed identity / Azure CLI",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment signs in as the identity the run has where it runs - a managed or workload identity, an Azure CLI login, or AZURE_* variables - with no key in the pipeline."
+              },
+              {
+                "key": "accountKey",
+                "label": "Account key",
                 "kind": "text",
                 "placeholder": "••••••••",
-                "secret": true
-              },
-              {
-                "key": "sessionToken",
-                "label": "Session token",
-                "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -8927,9 +8967,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -8937,12 +8998,20 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
                 "key": "sessionToken",
                 "label": "Session token",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -9247,9 +9316,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -9257,12 +9347,20 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
                 "key": "sessionToken",
                 "label": "Session token",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -9567,9 +9665,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -9577,12 +9696,20 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
                 "key": "sessionToken",
                 "label": "Session token",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -36795,9 +36922,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -36805,6 +36953,10 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37240,16 +37392,37 @@
             "label": "Credentials",
             "fields": [
               {
-                "key": "accessKey",
-                "label": "Access key",
+                "key": "accountName",
+                "label": "Storage account",
                 "kind": "text",
-                "secret": true
+                "placeholder": "mystorageaccount"
               },
               {
-                "key": "secretKey",
-                "label": "Secret key",
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Account key",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "Managed identity / Azure CLI",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment signs in as the identity the run has where it runs - a managed or workload identity, an Azure CLI login, or AZURE_* variables - with no key in the pipeline."
+              },
+              {
+                "key": "accountKey",
+                "label": "Account key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37449,9 +37622,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37459,6 +37653,10 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37658,9 +37856,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37668,6 +37887,10 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37867,9 +38090,30 @@
             "label": "Credentials",
             "fields": [
               {
+                "key": "cloudAuth",
+                "label": "Sign in with",
+                "kind": "select",
+                "defaultValue": "keys",
+                "options": [
+                  {
+                    "label": "Access keys",
+                    "value": "keys"
+                  },
+                  {
+                    "label": "IAM role / environment",
+                    "value": "environment"
+                  }
+                ],
+                "description": "The environment uses the AWS identity the run has where it runs - an instance or container role, IRSA, SSO, a profile or AWS_* variables - with no key in the pipeline. A run with none stops before it reads anything."
+              },
+              {
                 "key": "accessKey",
                 "label": "Access key",
                 "kind": "text",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {
@@ -37877,6 +38121,10 @@
                 "label": "Secret key",
                 "kind": "text",
                 "placeholder": "••••••••",
+                "visibleWhen": {
+                  "key": "cloudAuth",
+                  "equals": "keys"
+                },
                 "secret": true
               },
               {

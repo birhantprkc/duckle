@@ -296,12 +296,12 @@ COMPONENTS = {
     'snk.azureblob': {
         'kind': 'sink',
         'summary': 'Write via the azure extension',
-        'params': ['bucket', 'key', 'region', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
+        'params': ['bucket', 'key', 'region', 'accountName', 'cloudAuth', 'accountKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
     },
     'snk.b2': {
         'kind': 'sink',
         'summary': 'Write via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
+        'params': ['bucket', 'key', 'region', 'cloudAuth', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
     },
     'snk.bigquery': {
         'kind': 'sink',
@@ -452,7 +452,7 @@ COMPONENTS = {
     'snk.minio': {
         'kind': 'sink',
         'summary': 'Write via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
+        'params': ['bucket', 'key', 'region', 'cloudAuth', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
     },
     'snk.model': {
         'kind': 'sink',
@@ -542,7 +542,7 @@ COMPONENTS = {
     'snk.r2': {
         'kind': 'sink',
         'summary': 'Write via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
+        'params': ['bucket', 'key', 'region', 'cloudAuth', 'accessKey', 'secretKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'mode', 'compression', 'partitionBy'],
     },
     'snk.rabbit': {
         'kind': 'sink',
@@ -572,7 +572,7 @@ COMPONENTS = {
     'snk.s3': {
         'kind': 'sink',
         'summary': 'Write via DuckDB httpfs',
-        'params': ['path', 'connectionRef', 'format', 'accessKey', 'secretKey', 'region', 'compression', 'compressionLevel', 'parquetVersion', 'rowGroupSize', 'delimiter', 'writeHeader', 'nullValue', 'endpoint', 'urlStyle', 'useSsl'],
+        'params': ['path', 'connectionRef', 'format', 'cloudAuth', 'accessKey', 'secretKey', 'region', 'compression', 'compressionLevel', 'parquetVersion', 'rowGroupSize', 'delimiter', 'writeHeader', 'nullValue', 'endpoint', 'urlStyle', 'useSsl'],
     },
     'snk.salesforce': {
         'kind': 'sink',
@@ -692,12 +692,12 @@ COMPONENTS = {
     'src.azureblob': {
         'kind': 'source',
         'summary': 'Read via the azure extension',
-        'params': ['bucket', 'key', 'region', 'glob', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
+        'params': ['bucket', 'key', 'region', 'glob', 'accountName', 'cloudAuth', 'accountKey', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
     },
     'src.b2': {
         'kind': 'source',
         'summary': 'Read via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'glob', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
+        'params': ['bucket', 'key', 'region', 'glob', 'cloudAuth', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
     },
     'src.bigquery': {
         'kind': 'source',
@@ -963,7 +963,7 @@ COMPONENTS = {
     'src.minio': {
         'kind': 'source',
         'summary': 'Read via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'glob', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
+        'params': ['bucket', 'key', 'region', 'glob', 'cloudAuth', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
     },
     'src.model': {
         'kind': 'source',
@@ -1089,7 +1089,7 @@ COMPONENTS = {
     'src.r2': {
         'kind': 'source',
         'summary': 'Read via S3-compatible endpoint',
-        'params': ['bucket', 'key', 'region', 'glob', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
+        'params': ['bucket', 'key', 'region', 'glob', 'cloudAuth', 'accessKey', 'secretKey', 'sessionToken', 'connectionRef', 'endpoint', 'urlStyle', 'useSsl', 'format', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
     },
     'src.rabbit': {
         'kind': 'source',
@@ -1124,7 +1124,7 @@ COMPONENTS = {
     'src.s3': {
         'kind': 'source',
         'summary': 'Read via DuckDB httpfs',
-        'params': ['path', 'connectionRef', 'format', 'accessKey', 'secretKey', 'region', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
+        'params': ['path', 'connectionRef', 'format', 'cloudAuth', 'accessKey', 'secretKey', 'region', 'hasHeader', 'delimiter', 'quoteChar', 'encoding', 'skipLines', 'nullValue', 'nullPadding', 'ignoreErrors', 'readOptions', 'recordsPath', 'flatten', 'keepParentNames'],
     },
     'src.salesforce': {
         'kind': 'source',

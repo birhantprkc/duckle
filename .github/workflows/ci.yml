@@ -531,7 +531,9 @@ jobs:
           DUCKLE_MINIO_BUCKET: duckle-test
           DUCKLE_MINIO_ACCESS_KEY: minioadmin
           DUCKLE_MINIO_SECRET_KEY: minioadmin
-        run: cargo test -p duckle-duckdb-engine --test execution -- minio_
+        run: |
+          cargo test -p duckle-duckdb-engine --test execution -- minio_
+          cargo test -p duckle-duckdb-engine --test keyless_cloud
 
   # Live Salesforce integration (#166): runs the credential-free lifecycle
   # suite in docs/salesforce-sink/live-suite against a REAL org - insert ->

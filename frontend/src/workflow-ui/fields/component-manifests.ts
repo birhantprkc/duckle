@@ -5,6 +5,7 @@ import {
     portsForComponent,
     deadLetterFields,
     delimiterField,
+    storageAuthFields,
     encodingField,
 } from './manifest-synth';
 import { getExternalManifest, PALETTE } from '../palette-data';
@@ -609,8 +610,7 @@ export const MANIFESTS: Record<string, ComponentManifest> = {
             {
                 label: 'Credentials',
                 fields: [
-                    { key: 'accessKey', label: 'Access key', kind: 'text' },
-                    { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••' },
+                    ...storageAuthFields('src.s3', false),
                     { key: 'region', label: 'Region', kind: 'text', placeholder: 'us-east-1' },
                 ],
             },
@@ -1089,8 +1089,7 @@ export const MANIFESTS: Record<string, ComponentManifest> = {
             {
                 label: 'Credentials',
                 fields: [
-                    { key: 'accessKey', label: 'Access key', kind: 'text' },
-                    { key: 'secretKey', label: 'Secret key', kind: 'text', placeholder: '••••••••' },
+                    ...storageAuthFields('snk.s3', false),
                     { key: 'region', label: 'Region', kind: 'text', placeholder: 'us-east-1' },
                 ],
             },
@@ -1697,6 +1696,7 @@ const CREDENTIAL_KEYS = new Set([
     'accessKey',
     'secretKey',
     'secretAccessKey',
+    'accountKey',
     'clientSecret',
     'privateKey',
     'connectionString',
