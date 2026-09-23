@@ -1243,6 +1243,24 @@ half busy.
 semaphore cannot bound it. That path records the pool it belongs to and no queue
 time, because it never queued.
 
+### A time limit per run (`maxRunSeconds`)
+
+```json
+{ "name": "nightly-load", "maxRunSeconds": 3600, "nodes": [ ... ] }
+```
+
+A run still going after that many seconds is stopped and reported as a
+**failure** - `the run exceeded its time limit of 3600s` - so failure alerts
+fire and its schedule is free for the next occurrence, instead of a hung query
+holding it for as long as it hangs. Stopping kills the running DuckDB process,
+so it works mid-query, and a Wait node now sleeps in short slices, so a limit
+or a person pressing Cancel stops a wait too rather than queueing behind it.
+
+The limit is on the run that was started, on every surface - desktop, CLI,
+scheduler, API, MCP - because the engine enforces it where they all meet. A
+child pipeline it calls runs under the caller's limit and does not arm its
+own.
+
 ### Which tested version is running? (`release`)
 
 ```bash

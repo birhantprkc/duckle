@@ -46,6 +46,11 @@ pub struct PipelineDoc {
     /// compilation and every surface gets the same answer.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: crate::params::Schema,
+    /// #329 / #296: stop the run once it has been going this long, and report
+    /// it as a failure. A typed field, enforced where every surface's run
+    /// passes, so a hung run cannot hold its schedule however it was started.
+    #[serde(default, rename = "maxRunSeconds", skip_serializing_if = "Option::is_none")]
+    pub max_run_seconds: Option<u64>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -743,6 +748,8 @@ pub fn compile_partial(
         // Carried for the same reason: a subgraph of a pipeline is queued in
         // the pool the pipeline chose, not in the default one.
         resource_pool: pipeline.resource_pool.clone(),
+        // And the same limit: a partial run is still a run of this pipeline.
+        max_run_seconds: pipeline.max_run_seconds,
         parameters: Default::default(),
         nodes: pipeline
             .nodes

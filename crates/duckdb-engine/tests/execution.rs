@@ -1104,6 +1104,81 @@ fn a_quality_check_that_rejects_nothing_stays_quiet() {
     assert!(!note.contains("failed the check"), "{note}");
 }
 
+/// #329 / #296: a run that outlives its `maxRunSeconds` is stopped and reported
+/// as a timeout - a failure, so failure alerts fire - rather than holding its
+/// schedule for as long as it hangs.
+///
+/// Both ways a stage can stall: a long query, where the DuckDB child is killed,
+/// and a long wait, which slept in one piece and so could not be interrupted
+/// by a timeout or by a person pressing Cancel.
+#[test]
+fn a_run_past_its_time_limit_is_stopped_and_reported_as_a_timeout() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n");
+    let stalls = [
+        (
+            "query",
+            node(
+                "x",
+                "code.sql",
+                json!({ "sql": "SELECT sum(a.range * b.range) AS s FROM range(200000) a, range(200000) b" }),
+            ),
+        ),
+        ("wait", node("x", "ctl.wait", json!({ "duration": 60000, "unit": "ms" }))),
+    ];
+    for (what, stall) in stalls {
+        let out = out_path(tmp.path(), &format!("{what}.csv"));
+        let d: duckle_duckdb_engine::PipelineDoc = serde_json::from_value(json!({
+            "maxRunSeconds": 1,
+            "nodes": [
+                node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+                stall,
+                node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ],
+            "edges": [main_edge("e1", "s", "x"), main_edge("e2", "x", "k")]
+        }))
+        .unwrap();
+        let started = std::time::Instant::now();
+        let r = engine.execute_pipeline(&d);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(15), "{what}: took {took:?} to stop");
+        assert_eq!(r.status, "error", "{what}: a timeout is a failure, not a cancel: {:?}", r.error);
+        let err = r.error.unwrap_or_default();
+        assert!(err.contains("time limit") && err.contains("1s"), "{what}: {err}");
+    }
+    // The engine's next run is untouched by the stopped run's watchdog.
+    let out = out_path(tmp.path(), "after.csv");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "k")]),
+    ));
+    assert_eq!(r.status, "ok", "{:?}", r.error);
+}
+
+/// A run inside its limit finishes normally.
+#[test]
+fn a_run_inside_its_time_limit_is_left_alone() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id\n1\n");
+    let out = out_path(tmp.path(), "out.csv");
+    let d: duckle_duckdb_engine::PipelineDoc = serde_json::from_value(json!({
+        "maxRunSeconds": 60,
+        "nodes": [
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ],
+        "edges": [main_edge("e1", "s", "k")]
+    }))
+    .unwrap();
+    let r = engine.execute_pipeline(&d);
+    assert_eq!(r.status, "ok", "{:?}", r.error);
+}
+
 /// A reject that is NOT an error keeps the bare row.
 ///
 /// A filter's misses and a join's unmatched rows are the data taking the other

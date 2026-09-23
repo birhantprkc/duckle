@@ -218,6 +218,16 @@ pub struct DuckdbEngine {
     /// [`DuckdbEngine::execute_pipeline_with_events`]; `None` outside a run,
     /// where the node answers as soon as its rows are stored.
     webhook_acks: Option<Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>>,
+    /// #329 / #296: the run's `maxRunSeconds`, once armed. Set on the clone a
+    /// run executes on, so a called child inherits it and arms no second one:
+    /// the limit is on the run that was started.
+    deadline: Option<Arc<Deadline>>,
+}
+
+/// A run's time limit, and whether it has been hit.
+struct Deadline {
+    secs: u64,
+    fired: AtomicBool,
 }
 
 impl std::fmt::Debug for DuckdbEngine {
@@ -384,6 +394,7 @@ impl DuckdbEngine {
             run_id: None,
             probing: false,
             webhook_acks: None,
+            deadline: None,
         }
     }
 
@@ -501,6 +512,7 @@ impl DuckdbEngine {
             // A real run is not a probe, whatever this engine was.
             probing: false,
             webhook_acks: None,
+            deadline: None,
         }
     }
 
@@ -522,6 +534,7 @@ impl DuckdbEngine {
             inherited_subs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             probing: true,
             webhook_acks: None,
+            deadline: None,
         }
     }
 
@@ -542,6 +555,17 @@ impl DuckdbEngine {
 
     pub fn clear_cancel(&self) {
         self.cancel.store(false, Ordering::Relaxed);
+    }
+
+    /// When a cancelled run was stopped by its own `maxRunSeconds`, the error to
+    /// report instead: a timeout is a failure, so failure alerts fire, where a
+    /// cancel somebody asked for is not.
+    fn deadline_error(&self, was_cancelled: bool) -> Option<String> {
+        let d = self.deadline.as_ref().filter(|d| was_cancelled && d.fired.load(Ordering::Relaxed))?;
+        Some(format!(
+            "the run exceeded its time limit of {}s (maxRunSeconds) and was stopped",
+            d.secs
+        ))
     }
 
     /// Returns Err(Cancelled) if a cancel has been requested. Used at
@@ -1406,8 +1430,44 @@ impl DuckdbEngine {
     {
         use std::io::Write;
         let acks = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let run = DuckdbEngine { webhook_acks: Some(Arc::clone(&acks)), ..self.clone() };
+        // #329 / #296: a limit is armed by the run that was started, never by a
+        // child it calls - the child runs on this clone and inherits it.
+        let deadline = match (&self.deadline, doc.max_run_seconds.filter(|s| *s > 0)) {
+            (None, Some(secs)) => Some(Arc::new(Deadline { secs, fired: AtomicBool::new(false) })),
+            _ => None,
+        };
+        let run = DuckdbEngine {
+            webhook_acks: Some(Arc::clone(&acks)),
+            deadline: deadline.clone().or_else(|| self.deadline.clone()),
+            ..self.clone()
+        };
+        // The watchdog marks the deadline and then asks for a cancel, which
+        // kills the running DuckDB child. It is told when the run ends and is
+        // joined before anything reads the flag, so it cannot fire into the
+        // engine's NEXT run.
+        let watchdog = deadline.as_ref().map(|d| {
+            let (done, wait) = std::sync::mpsc::channel::<()>();
+            let (d, cancel) = (Arc::clone(d), Arc::clone(&run.cancel));
+            let handle = std::thread::spawn(move || {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    wait.recv_timeout(std::time::Duration::from_secs(d.secs))
+                {
+                    d.fired.store(true, Ordering::Relaxed);
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            (done, handle)
+        });
         let result = run.execute_pipeline_in_run(doc, target, pipeline_name, user_on_event);
+        if let Some((done, handle)) = watchdog {
+            let _ = done.send(());
+            let _ = handle.join();
+            // The cancel was the deadline's, not anyone's request, so it must not
+            // outlive this run on an engine that is used again.
+            if deadline.as_ref().is_some_and(|d| d.fired.load(Ordering::Relaxed)) {
+                self.cancel.store(false, Ordering::Relaxed);
+            }
+        }
         let answer: &[u8] = if result.status == "ok" {
             b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
         } else {
@@ -1932,7 +1992,19 @@ impl DuckdbEngine {
             // before running the SQL. Done in the executor so the
             // planner stays declarative.
             if let Some(ms) = stage.wait_ms {
-                std::thread::sleep(std::time::Duration::from_millis(ms));
+                // In slices, so a cancel - asked for, or a run's time limit -
+                // stops a wait instead of queueing behind it. One sleep of the
+                // whole duration kept a run going for as long as it had asked
+                // to wait, whatever happened meanwhile. The stage's own run
+                // then sees the flag and reports the cancel.
+                let until = Instant::now() + std::time::Duration::from_millis(ms);
+                while !self.cancel.load(Ordering::Relaxed) {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(left.min(std::time::Duration::from_millis(100)));
+                }
             }
             let started = Instant::now();
             // Advanced settings: memoryLimitMb prepends a PRAGMA so heavy
@@ -2984,6 +3056,10 @@ impl DuckdbEngine {
             }
         }
 
+        if let Some(timeout) = self.deadline_error(was_cancelled) {
+            was_cancelled = false;
+            overall_error = Some(timeout);
+        }
         let mut final_status = if was_cancelled {
             "cancelled"
         } else if overall_error.is_some() {
@@ -3654,6 +3730,10 @@ impl DuckdbEngine {
             });
         }
 
+        if let Some(timeout) = self.deadline_error(was_cancelled) {
+            was_cancelled = false;
+            overall_error = Some(timeout);
+        }
         let final_status = if was_cancelled {
             "cancelled"
         } else if overall_error.is_some() {
