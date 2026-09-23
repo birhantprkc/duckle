@@ -19683,13 +19683,19 @@ fn an_edit_made_during_a_run_is_not_overwritten_by_its_flush() {
             node("s", "src.csv", json!({ "path": src, "hasHeader": true })),
             node("i", "xf.incremental", json!({ "column": "ts" })),
             node("p", "snk.csv", json!({ "path": probe, "hasHeader": true })),
-            node("w", "ctl.wait", json!({ "duration": 2000, "unit": "ms" })),
+            // `d`, not `w`: the planner runs ready nodes in reverse id order, so
+            // the delay's id has to sort BEFORE the probe's for the probe to be
+            // written first. As `w` the delay ran first - measured, the probe
+            // landed at +2966ms and the output at +3077ms - so the window below
+            // did not exist and the edit raced the flush, which is how this
+            // failed on a loaded macOS runner.
+            node("d", "ctl.wait", json!({ "duration": 2000, "unit": "ms" })),
             node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
         ]),
         json!([
             main_edge("e1", "s", "i"),
-            main_edge("e2", "i", "w"),
-            main_edge("e3", "w", "k"),
+            main_edge("e2", "i", "d"),
+            main_edge("e3", "d", "k"),
             main_edge("e4", "i", "p"),
         ]),
     );
@@ -19709,6 +19715,7 @@ fn an_edit_made_during_a_run_is_not_overwritten_by_its_flush() {
             assert!(std::time::Instant::now() < deadline, "the incremental node never ran");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        let seen = std::time::Instant::now();
         duckle_duckdb_engine::watermark::set_incremental(
             &ws_for_thread,
             "midrun",
@@ -19717,10 +19724,22 @@ fn an_edit_made_during_a_run_is_not_overwritten_by_its_flush() {
             Some("TIMESTAMP"),
         )
         .expect("operator edit");
+        seen
     });
 
     let r = engine.execute_pipeline_named(&pipeline, name);
-    editor.join().expect("editor thread");
+    let finished = std::time::Instant::now();
+    let seen = editor.join().expect("editor thread");
+    // The premise, checked rather than assumed: the probe appeared with the
+    // delay still ahead of the run. If a change to stage ordering puts the delay
+    // first again, this says so instead of the test failing one run in fifty.
+    let window = finished.duration_since(seen);
+    assert!(
+        window >= std::time::Duration::from_millis(1500),
+        "the probe appeared only {}ms before the run finished, so the delay ran \
+         before it and the edit raced the flush instead of landing inside a window",
+        window.as_millis()
+    );
 
     // The rows were written - the run did its job. What must NOT have happened
     // is the flush putting the watermark back on top of the operator's value.
