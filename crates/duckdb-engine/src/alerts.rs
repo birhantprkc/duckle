@@ -109,7 +109,22 @@ pub enum Channel {
         from: String,
         to: Vec<String>,
     },
+    /// PagerDuty Events API v2. A failure or a stale asset TRIGGERS an
+    /// incident and its all-clear RESOLVES the same one, matched by a dedup key
+    /// naming the subject, so a recovered outage closes itself.
+    #[serde(rename_all = "camelCase")]
+    PagerDuty {
+        /// The integration's routing key. Supports `${ENV:NAME}`: it is a
+        /// credential, and never appears in state or logs.
+        routing_key: String,
+        /// Defaults to the public endpoint; the EU service region uses
+        /// `https://events.eu.pagerduty.com/v2/enqueue`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint: Option<String>,
+    },
 }
+
+const PAGERDUTY_EVENTS: &str = "https://events.pagerduty.com/v2/enqueue";
 
 fn default_smtp_port() -> u16 {
     587
@@ -212,7 +227,21 @@ pub fn load(workspace: &Path) -> Result<Alerts, String> {
     if text.trim().is_empty() {
         return Ok(Alerts::default());
     }
-    serde_json::from_str(&text).map_err(|e| format!("parse alerts.json: {e}"))
+    let alerts: Alerts =
+        serde_json::from_str(&text).map_err(|e| format!("parse alerts.json: {e}"))?;
+    // A page for every success is never wanted, and dropping the event quietly
+    // would be a rule that says one thing and does another.
+    if let Some(rule) = alerts
+        .rules
+        .iter()
+        .find(|r| matches!(r.channel, Channel::PagerDuty { .. }) && r.on.contains(&Event::Success))
+    {
+        return Err(format!(
+            "alerts.json: the pagerduty rule for '{}' asks for success, which is not an incident; take success off that rule",
+            rule.pattern
+        ));
+    }
+    Ok(alerts)
 }
 
 /// What has been sent and how each pipeline last finished.
@@ -309,6 +338,10 @@ fn channel_id(channel: &Channel) -> String {
     match channel {
         Channel::Webhook { url, .. } => format!("webhook:{}", host_of(url)),
         Channel::Email { smtp_host, to, .. } => format!("email:{smtp_host}:{}", to.join(",")),
+        // The endpoint's host, never the routing key.
+        Channel::PagerDuty { endpoint, .. } => {
+            format!("pagerduty:{}", host_of(endpoint.as_deref().unwrap_or(PAGERDUTY_EVENTS)))
+        }
     }
 }
 
@@ -332,6 +365,12 @@ fn redact_secrets(error: &str, channel: &Channel) -> String {
         }
         Channel::Email { password, .. } => {
             let resolved = resolve_env(password);
+            if !resolved.is_empty() {
+                out = out.replace(&resolved, "<redacted>");
+            }
+        }
+        Channel::PagerDuty { routing_key, .. } => {
+            let resolved = resolve_env(routing_key);
             if !resolved.is_empty() {
                 out = out.replace(&resolved, "<redacted>");
             }
@@ -601,6 +640,44 @@ fn deliver(channel: &Channel, message: &Message) -> Result<(), String> {
         Channel::Email { smtp_host, smtp_port, username, password, from, to } => {
             send_email(smtp_host, *smtp_port, username, password, from, to, message)
         }
+        Channel::PagerDuty { routing_key, endpoint } => {
+            let key = resolve_env(routing_key);
+            if key.is_empty() || key.contains("${ENV:") {
+                return Err("pagerduty routing key is empty or has an unset ${ENV:...} placeholder".into());
+            }
+            // One incident per subject and kind: a failed run and a stale
+            // asset are different problems and close separately.
+            let (action, severity, kind) = match message.event.as_str() {
+                "failure" => ("trigger", "error", "run"),
+                "recovery" => ("resolve", "error", "run"),
+                "stale" => ("trigger", "warning", "freshness"),
+                "refreshed" => ("resolve", "warning", "freshness"),
+                other => return Err(format!("pagerduty does not take '{other}' events")),
+            };
+            let body = serde_json::json!({
+                "routing_key": key,
+                "event_action": action,
+                "dedup_key": format!("duckle/{}/{kind}", message.pipeline),
+                "payload": {
+                    "summary": message.text,
+                    "source": "duckle",
+                    "severity": severity,
+                    "custom_details": {
+                        "status": message.status,
+                        "durationMs": message.duration_ms,
+                        "error": message.error,
+                        "category": message.category,
+                    },
+                },
+            });
+            crate::tls::http_agent()
+                .post(endpoint.as_deref().unwrap_or(PAGERDUTY_EVENTS))
+                .timeout(DELIVERY_TIMEOUT)
+                .set("Content-Type", "application/json")
+                .send_json(body)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -805,6 +882,63 @@ mod tests {
             }
         });
         (url, seen)
+    }
+
+    /// PagerDuty holds incidents, not messages: a failure opens one and the
+    /// all-clear resolves the SAME one, found by a dedup key naming the
+    /// pipeline. Without the resolve every recovered outage stays open until
+    /// somebody closes it by hand, and a team learns to ignore the page.
+    #[test]
+    fn pagerduty_opens_an_incident_on_failure_and_resolves_it_on_recovery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        let (url, seen) = capture_webhook();
+        write_rules(
+            ws,
+            serde_json::json!({ "rules": [
+                { "match": "*", "channel": "pagerduty", "routingKey": "R0UTINGKEY42", "endpoint": url }
+            ]}),
+        );
+        assert_eq!(notify(ws, "nightly", &result("error", Some("ORA-01017"))), 1);
+        assert_eq!(notify(ws, "nightly", &result("ok", None)), 1);
+
+        let bodies = seen.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "one to open, one to resolve");
+        let open: serde_json::Value = serde_json::from_str(&bodies[0]).expect("JSON");
+        let close: serde_json::Value = serde_json::from_str(&bodies[1]).expect("JSON");
+        assert_eq!(open["routing_key"], "R0UTINGKEY42");
+        assert_eq!(open["event_action"], "trigger");
+        assert_eq!(open["payload"]["severity"], "error");
+        assert_eq!(open["payload"]["source"], "duckle");
+        assert!(
+            open["payload"]["summary"].as_str().unwrap_or("").starts_with("Duckle: nightly FAILED"),
+            "{open}"
+        );
+        assert_eq!(open["payload"]["custom_details"]["error"], "ORA-01017");
+        assert!(open["dedup_key"].as_str().unwrap_or("").contains("nightly"), "{open}");
+        assert_eq!(close["event_action"], "resolve");
+        assert_eq!(
+            close["dedup_key"], open["dedup_key"],
+            "the recovery must close the incident the failure opened"
+        );
+        // The cooldown state is written to disk; the routing key is a secret.
+        let state = std::fs::read_to_string(state_path(ws)).unwrap_or_default();
+        assert!(!state.is_empty() && !state.contains("R0UTINGKEY42"), "{state}");
+    }
+
+    /// Paging on every success is never wanted, and quietly dropping the event
+    /// would be a rule that says one thing and does another.
+    #[test]
+    fn a_pagerduty_rule_for_success_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_rules(
+            tmp.path(),
+            serde_json::json!({ "rules": [
+                { "match": "*", "channel": "pagerduty", "routingKey": "k", "on": ["failure", "success"] }
+            ]}),
+        );
+        let err = load(tmp.path()).expect_err("a paging rule for success must be refused");
+        assert!(err.contains("pagerduty") && err.contains("success"), "{err}");
     }
 
     #[test]

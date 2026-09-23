@@ -3323,7 +3323,8 @@ available over MCP as `workspace_impact`.
   "rules": [
     { "match": "nightly-*", "channel": "webhook", "url": "${ENV:SLACK_WEBHOOK}", "cooldownMinutes": 15 },
     { "match": "*", "channel": "email", "smtpHost": "smtp.example.com",
-      "from": "duckle@example.com", "to": ["oncall@example.com"] }
+      "from": "duckle@example.com", "to": ["oncall@example.com"] },
+    { "match": "prod-*", "channel": "pagerduty", "routingKey": "${ENV:PAGERDUTY_ROUTING_KEY}" }
   ]
 }
 ```
@@ -3335,6 +3336,8 @@ The webhook payload carries a `text` field as well as structured fields, so Slac
 - **It never breaks a run.** Delivery happens after the run is recorded, is time-bounded, and an unreachable channel is logged rather than raised.
 
 A schedule whose pipeline file has been renamed or deleted also raises an alert, instead of silently doing nothing.
+
+**PagerDuty** (Events API v2) holds incidents rather than messages, so a failure opens one and its `recovery` resolves the **same** incident, matched by a dedup key naming the pipeline: a recovered outage closes itself instead of waiting for someone to close it by hand. A stale asset opens its own incident at warning severity, resolved when the asset is written again. The routing key is a credential, so it takes `${ENV:...}` and never appears in the saved cooldown state or in a logged error. `endpoint` points elsewhere, for the EU service region (`https://events.eu.pagerduty.com/v2/enqueue`). A PagerDuty rule that asks for `success` is refused when the rules load, because a page for every success is never what anyone wants and quietly dropping it would be a rule that says one thing and does another.
 
 ---
 
