@@ -1757,7 +1757,7 @@ impl DuckdbEngine {
                 total_start,
                 &mask::tags_from_doc(doc),
                 counts_need_every_column,
-                &row_count_wanted(doc),
+                &EndOfRun::from_doc(doc),
                 &mut on_event,
             );
             return r;
@@ -3079,7 +3079,7 @@ impl DuckdbEngine {
             }
         }
 
-        row_count_logs(&compiled.stages, &nodes, &row_count_wanted(doc), &mut on_event);
+        end_of_run(&compiled.stages, &mut nodes, &EndOfRun::from_doc(doc), &mut on_event);
         on_event(PipelineEvent::Finished {
             status: final_status.into(),
             duration_ms: total_start.elapsed().as_millis() as u64,
@@ -3149,8 +3149,8 @@ impl DuckdbEngine {
         // Same reason: whether any node asked for `ignoreErrors`, which decides
         // whether a row count has to read every column to be true.
         counts_need_every_column: bool,
-        // "Log row count", ticked nodes to their labels. Same reason again.
-        log_row_count: &std::collections::BTreeMap<String, String>,
+        // What the end of the run reports from the document. Same reason again.
+        end: &EndOfRun,
         on_event: &mut dyn FnMut(PipelineEvent),
     ) -> RunResult {
         use std::io::Write;
@@ -3662,7 +3662,7 @@ impl DuckdbEngine {
             "ok"
         };
         let duration_ms = total_start.elapsed().as_millis() as u64;
-        row_count_logs(stages, &nodes, log_row_count, on_event);
+        end_of_run(stages, &mut nodes, end, on_event);
         on_event(PipelineEvent::Finished {
             status: final_status.into(),
             duration_ms,
@@ -7362,16 +7362,121 @@ impl RunResult {
     }
 }
 
-/// The nodes whose "Log row count" is ticked, with their labels.
-fn row_count_wanted(doc: &PipelineDoc) -> std::collections::BTreeMap<String, String> {
-    doc.nodes
-        .iter()
-        .filter(|n| {
-            n.data.properties.as_ref().and_then(|p| p.get("logRowCount")).and_then(|v| v.as_bool())
-                == Some(true)
-        })
-        .map(|n| (n.id.clone(), n.data.label.clone()))
-        .collect()
+/// What the end of a run reports, read from the document once. The batched
+/// path is handed this rather than the document, as it is the column tags.
+pub(crate) struct EndOfRun {
+    /// "Log row count": ticked nodes, with their labels.
+    log_row_count: std::collections::BTreeMap<String, String>,
+    /// #101: quality checks whose failing rows leave the main output.
+    reject_watch: std::collections::BTreeMap<String, RejectWatch>,
+}
+
+struct RejectWatch {
+    label: String,
+    /// The node feeding its main input, whose row count is the check's input.
+    input: String,
+    /// Whether anything reads its reject port.
+    wired: bool,
+}
+
+/// Quality checks whose pass and reject outputs split their input, so what
+/// they rejected is input rows minus output rows.
+const REJECTING_CHECKS: [&str; 7] = [
+    "qa.notnull",
+    "qa.schemavalidate",
+    "qa.range",
+    "qa.regex",
+    "qa.unique",
+    "qa.outlier",
+    "qa.refintegrity",
+];
+
+impl EndOfRun {
+    pub(crate) fn from_doc(doc: &PipelineDoc) -> Self {
+        let main = |h: &Option<String>| matches!(h.as_deref(), None | Some("") | Some("main"));
+        let log_row_count = doc
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.data.properties.as_ref().and_then(|p| p.get("logRowCount")).and_then(|v| v.as_bool())
+                    == Some(true)
+            })
+            .map(|n| (n.id.clone(), n.data.label.clone()))
+            .collect();
+        let reject_watch = doc
+            .nodes
+            .iter()
+            .filter(|n| REJECTING_CHECKS.contains(&n.data.component_id.as_deref().unwrap_or("")))
+            // warn keeps every row on the main output and fail stops the run,
+            // so only reject (the default) takes rows away.
+            .filter(|n| {
+                let on_fail = n
+                    .data
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get("onFail"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                on_fail.is_empty() || on_fail == "reject"
+            })
+            .filter_map(|n| {
+                // Only from a main-to-main edge is the upstream's count the
+                // check's input; anything else is not a count this can use.
+                let input = doc
+                    .edges
+                    .iter()
+                    .find(|e| e.target == n.id && main(&e.target_handle) && main(&e.source_handle))?
+                    .source
+                    .clone();
+                let wired = doc.edges.iter().any(|e| {
+                    e.source == n.id && matches!(e.source_handle.as_deref(), Some("reject") | Some("filter"))
+                });
+                Some((n.id.clone(), RejectWatch { label: n.data.label.clone(), input, wired }))
+            })
+            .collect();
+        Self { log_row_count, reject_watch }
+    }
+}
+
+/// What the end of the run says, sent by BOTH execution paths just before it
+/// finishes - the one point where every count is settled.
+fn end_of_run(
+    stages: &[plan::Stage],
+    nodes: &mut std::collections::BTreeMap<String, NodeRunStatus>,
+    end: &EndOfRun,
+    on_event: &mut dyn FnMut(PipelineEvent),
+) {
+    // #101: rows a quality check rejected, on its node. Rows that went nowhere
+    // are also a warning: a check with nothing on its reject port discarded
+    // them, and the run otherwise reported ok without a word about it.
+    for stage in stages {
+        let Some(w) = end.reject_watch.get(&stage.node_id) else { continue };
+        let rows_in = nodes.get(&w.input).and_then(|n| n.rows);
+        let rows_out = nodes.get(&stage.node_id).and_then(|n| n.rows);
+        let (Some(rows_in), Some(rows_out)) = (rows_in, rows_out) else { continue };
+        let Some(rejected) = rows_in.checked_sub(rows_out).filter(|n| *n > 0) else { continue };
+        let what = if w.wired {
+            format!("{rejected} rows failed the check and went to its reject port")
+        } else {
+            format!("{rejected} rows failed the check and were dropped: nothing is connected to its reject port")
+        };
+        if let Some(st) = nodes.get_mut(&stage.node_id) {
+            st.note = Some(match st.note.take().filter(|n| !n.trim().is_empty()) {
+                Some(prev) => format!("{prev}; {what}"),
+                None => what.clone(),
+            });
+        }
+        if !w.wired {
+            on_event(PipelineEvent::Log {
+                node_id: stage.node_id.clone(),
+                level: "warn".into(),
+                message: format!("{}: {what}", w.label),
+            });
+        }
+    }
+    row_count_logs(stages, nodes, &end.log_row_count, on_event);
 }
 
 /// "Log row count": each ticked node's final count as a log line, in stage

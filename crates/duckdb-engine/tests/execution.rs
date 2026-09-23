@@ -1036,6 +1036,74 @@ fn log_row_count_reports_the_final_count_on_both_paths() {
     }
 }
 
+/// #101: a quality check says how many rows it rejected, and a check whose
+/// reject port is not connected says those rows were dropped.
+///
+/// Measured before this: three rows in, two failing a not-null check, one row
+/// written - status ok, and nothing anywhere said two were discarded. With
+/// On failure left at reject, the pass and reject outputs split the input, so
+/// the count is input minus output: no extra pass over the data.
+#[test]
+fn a_quality_check_says_how_many_rows_it_rejected_on_both_paths() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id,email\n1,a@x.io\n2,\n3,\n");
+    for (path, target) in [("batched", None), ("per-stage", Some("k"))] {
+        for wired in [false, true] {
+            let out = out_path(tmp.path(), &format!("{path}_{wired}.csv"));
+            let rej = out_path(tmp.path(), &format!("{path}_{wired}_rej.csv"));
+            let mut nodes = vec![
+                node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+                node("q", "qa.notnull", json!({ "columns": ["email"] })),
+                node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+            ];
+            let mut edges = vec![main_edge("e1", "s", "q"), main_edge("e2", "q", "k")];
+            if wired {
+                nodes.push(node("kr", "snk.csv", json!({ "path": rej, "hasHeader": true })));
+                edges.push(port_edge("e3", "q", "reject", "kr"));
+            }
+            let mut warnings: Vec<String> = Vec::new();
+            let r = engine.execute_pipeline_with_events(&doc(json!(nodes), json!(edges)), target, None, |ev| {
+                if let duckle_duckdb_engine::PipelineEvent::Log { node_id, level, message } = ev {
+                    if node_id == "q" && level == "warn" {
+                        warnings.push(message.clone());
+                    }
+                }
+            });
+            assert_eq!(r.status, "ok", "{path}/{wired}: {:?}", r.error);
+            let note = r.nodes.get("q").and_then(|n| n.note.clone()).unwrap_or_default();
+            assert!(note.contains("2 rows failed the check"), "{path}/{wired}: {note}");
+            if wired {
+                assert!(note.contains("reject port"), "{path}: {note}");
+                assert!(warnings.is_empty(), "{path}: rows that went somewhere are not a warning: {warnings:?}");
+            } else {
+                assert!(note.contains("dropped"), "{path}: {note}");
+                assert_eq!(warnings.len(), 1, "{path}: dropping rows is a warning: {warnings:?}");
+            }
+        }
+    }
+}
+
+/// A check that rejects nothing adds nothing.
+#[test]
+fn a_quality_check_that_rejects_nothing_stays_quiet() {
+    let engine = engine_or_skip!();
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_file(tmp.path(), "in.csv", "id,email\n1,a@x.io\n");
+    let out = out_path(tmp.path(), "out.csv");
+    let r = engine.execute_pipeline(&doc(
+        json!([
+            node("s", "src.csv", json!({ "path": csv, "hasHeader": true })),
+            node("q", "qa.notnull", json!({ "columns": ["email"] })),
+            node("k", "snk.csv", json!({ "path": out, "hasHeader": true })),
+        ]),
+        json!([main_edge("e1", "s", "q"), main_edge("e2", "q", "k")]),
+    ));
+    assert_eq!(r.status, "ok", "{:?}", r.error);
+    let note = r.nodes.get("q").and_then(|n| n.note.clone()).unwrap_or_default();
+    assert!(!note.contains("failed the check"), "{note}");
+}
+
 /// A reject that is NOT an error keeps the bare row.
 ///
 /// A filter's misses and a join's unmatched rows are the data taking the other
