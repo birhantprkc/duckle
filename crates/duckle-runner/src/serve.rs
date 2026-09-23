@@ -232,6 +232,11 @@ struct State {
     /// `pump_deliveries`: held so the next tick writes them instead of running
     /// the consumer a second time.
     unrecorded_deliveries: Mutex<HashMap<String, duckle_duckdb_engine::subscribe::Delivery>>,
+    /// When the scheduler last ticked, in unix milliseconds. Stamped at spawn and
+    /// on every tick, so readiness and metrics can tell a scheduler that is
+    /// keeping time from one whose thread has died or hung - which otherwise
+    /// looks exactly like a quiet night.
+    scheduler_heartbeat: std::sync::atomic::AtomicU64,
 }
 
 /// #259: one asynchronous run. `finished` is None while it is queued or
@@ -345,6 +350,7 @@ pub fn run() -> Result<(), String> {
         oidc_endpoints: Mutex::new(None),
         oidc_logins: Mutex::new(Default::default()),
         unrecorded_deliveries: Mutex::new(Default::default()),
+        scheduler_heartbeat: std::sync::atomic::AtomicU64::new(unix_millis()),
     });
 
     // Fold any pre-unification console store into schedules.json before the
@@ -675,7 +681,8 @@ fn route_web(req: &Request, state: &WebState) -> Reply {
         return respond_403("blocked: cross-origin or non-local request");
     }
     if is_public_route(&req.method, &req.path) {
-        if let Some(reply) = probe_reply(&req.path, &state.workspace) {
+        // The editor schedules nothing, so it has no scheduler to report on.
+        if let Some(reply) = probe_reply(&req.path, &state.workspace, None) {
             return reply;
         }
         return web_sign_in(state, &req);
@@ -1961,6 +1968,13 @@ fn metrics_body(state: &State) -> String {
             "Async runs this process is still holding, finished or not.",
             accepted,
         ),
+        (
+            "duckle_scheduler_seconds_since_tick",
+            "Seconds since the scheduler last ticked. Growing past a few tick intervals means no schedule is firing.",
+            (unix_millis()
+                .saturating_sub(state.scheduler_heartbeat.load(std::sync::atomic::Ordering::Relaxed))
+                / 1000) as usize,
+        ),
     ] {
         out.push_str(&format!("# HELP {name} {help}
 # TYPE {name} gauge
@@ -2368,7 +2382,11 @@ fn oidc_route(req: &Request, state: &State) -> Reply {
 /// Shared by the console and the editor because both are processes an
 /// orchestrator probes, and a probe that answers on one and redirects to a
 /// sign-in page on the other is worse than not having it.
-fn probe_reply(path: &str, workspace: &Path) -> Option<Reply> {
+fn probe_reply(
+    path: &str,
+    workspace: &Path,
+    scheduler: Option<(&std::sync::atomic::AtomicU64, Duration)>,
+) -> Option<Reply> {
     if path == HEALTH_PATH {
         return Some(respond("200 OK", "text/plain; charset=utf-8", b"ok"));
     }
@@ -2376,7 +2394,14 @@ fn probe_reply(path: &str, workspace: &Path) -> Option<Reply> {
         // Writable, not merely present: a workspace mounted read-only, or one
         // whose disk has filled, answers every read fine and cannot record a
         // single run. That is exactly the state readiness exists to catch.
-        return Some(match probe_ready(workspace) {
+        // A console whose scheduler has stopped still answers every request,
+        // and every schedule it holds silently stops firing - the state
+        // readiness exists to surface. The editor passes None: it schedules
+        // nothing.
+        let stalled = scheduler.and_then(|(beat, tick)| {
+            scheduler_stall(beat.load(std::sync::atomic::Ordering::Relaxed), unix_millis(), tick)
+        });
+        return Some(match probe_ready(workspace).and_then(|()| stalled.map_or(Ok(()), Err)) {
             Ok(()) => respond("200 OK", "text/plain; charset=utf-8", b"ready"),
             // 503, so a load balancer takes it out of rotation rather than
             // restarting it: the process is fine, its storage is not.
@@ -2392,7 +2417,8 @@ fn probe_reply(path: &str, workspace: &Path) -> Option<Reply> {
 }
 
 fn public_route(req: &Request, state: &State) -> Reply {
-    if let Some(reply) = probe_reply(&req.path, &state.workspace) {
+    let scheduler = Some((&state.scheduler_heartbeat, state.tick_interval));
+    if let Some(reply) = probe_reply(&req.path, &state.workspace, scheduler) {
         return reply;
     }
     // Before the sign-in fallthrough below. A path in PUBLIC_ROUTES with no
@@ -4747,6 +4773,31 @@ fn fire_plan(state: &State, plan_id: &str) {
 /// they are written in hours - and coarse enough to be free.
 const FRESHNESS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Why the scheduler counts as stalled, or None while it is keeping time.
+///
+/// Five missed ticks, and never less than a minute, so a slow disk or a busy
+/// machine is not reported as a dead scheduler. A thread that has panicked or
+/// hung stops stamping altogether, which is what this is for: from the outside
+/// it is otherwise indistinguishable from a night on which nothing was due.
+fn scheduler_stall(last_tick_ms: u64, now_ms: u64, tick: Duration) -> Option<String> {
+    let allowed = (tick.as_millis() as u64).saturating_mul(5).max(60_000);
+    let since = now_ms.saturating_sub(last_tick_ms);
+    (since > allowed).then(|| {
+        format!(
+            "the scheduler has not ticked for {}s (it ticks every {}s), so no schedule is firing",
+            since / 1000,
+            tick.as_secs().max(1)
+        )
+    })
+}
+
 fn spawn_scheduler(state: Arc<State>) {
     std::thread::spawn(move || {
         let mut last_fired: HashMap<String, Instant> = HashMap::new();
@@ -4775,6 +4826,11 @@ fn spawn_scheduler(state: Arc<State>) {
             Arc::new(Mutex::new(std::collections::HashSet::new()));
         loop {
             std::thread::sleep(state.tick_interval);
+            // First thing on every tick, so a tick that hangs or panics below
+            // stops the heartbeat, and readiness and metrics can say so.
+            state
+                .scheduler_heartbeat
+                .store(unix_millis(), std::sync::atomic::Ordering::Relaxed);
             // #325: publications are checked every tick. Unlike freshness this
             // is cheap - the log is append-only and the delivery ledger is a
             // map - and unlike freshness it is latency that matters: the point
@@ -5596,9 +5652,79 @@ mod tests {
     }
 
 
+    /// A scheduler that has stopped ticking is named, not mistaken for a quiet
+    /// night. Five missed ticks and never under a minute, so a slow disk or a
+    /// busy machine is not reported as a dead scheduler.
+    #[test]
+    fn a_stalled_scheduler_is_named_and_a_slow_one_is_not() {
+        let tick = std::time::Duration::from_secs(15);
+        assert!(super::scheduler_stall(1_000_000, 1_060_000, tick).is_none(), "at the limit");
+        let why = super::scheduler_stall(1_000_000, 1_090_000, tick).expect("90s without a 15s tick");
+        assert!(why.contains("not ticked for 90s"), "{why}");
+        assert!(
+            super::scheduler_stall(0, 45_000, std::time::Duration::from_secs(1)).is_none(),
+            "a one-second tick still gets a minute's grace"
+        );
+    }
+
+    /// Readiness answers 503 naming the scheduler, so an orchestrator sees it;
+    /// the editor, which schedules nothing, is never held to it.
+    #[test]
+    fn readiness_reports_a_stalled_scheduler_and_only_where_there_is_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tick = std::time::Duration::from_secs(15);
+        let stalled = std::sync::atomic::AtomicU64::new(super::unix_millis() - 10 * 60_000);
+        let reply = super::probe_reply(super::READY_PATH, tmp.path(), Some((&stalled, tick))).unwrap();
+        assert!(reply.status.starts_with("503"), "{}", reply.status);
+        assert!(String::from_utf8_lossy(&reply.body).contains("scheduler"));
+        let fresh = std::sync::atomic::AtomicU64::new(super::unix_millis());
+        let reply = super::probe_reply(super::READY_PATH, tmp.path(), Some((&fresh, tick))).unwrap();
+        assert!(reply.status.starts_with("200"), "{}", reply.status);
+        let reply = super::probe_reply(super::READY_PATH, tmp.path(), None).unwrap();
+        assert!(reply.status.starts_with("200"), "no scheduler, nothing to report: {}", reply.status);
+    }
+
+    /// The same heartbeat as a number, so an alert can fire on a growing gap
+    /// before readiness trips.
+    #[test]
+    fn metrics_expose_seconds_since_the_scheduler_ticked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = local_state(tmp.path());
+        state
+            .scheduler_heartbeat
+            .store(super::unix_millis() - 42_000, std::sync::atomic::Ordering::Relaxed);
+        let body = super::metrics_body(&state);
+        let value: u64 = body
+            .lines()
+            .find_map(|l| l.strip_prefix("duckle_scheduler_seconds_since_tick "))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no scheduler gauge in:\n{body}"));
+        assert!((42..=45).contains(&value), "{value}");
+    }
+
+    /// The wiring, which is the half that silently does nothing if it is in the
+    /// wrong place: the real loop stamps the heartbeat as it ticks.
+    #[test]
+    fn the_scheduler_loop_stamps_its_heartbeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = local_state_ticking(tmp.path(), std::time::Duration::from_millis(20));
+        let started = state.scheduler_heartbeat.load(std::sync::atomic::Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        super::spawn_scheduler(state.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.scheduler_heartbeat.load(std::sync::atomic::Ordering::Relaxed) <= started {
+            assert!(std::time::Instant::now() < deadline, "the loop never stamped its heartbeat");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// A console bound to loopback with nothing configured, which is what
     /// `duckle-runner serve` does by default.
     fn local_state(ws: &std::path::Path) -> std::sync::Arc<State> {
+        local_state_ticking(ws, std::time::Duration::from_secs(15))
+    }
+
+    fn local_state_ticking(ws: &std::path::Path, tick: std::time::Duration) -> std::sync::Arc<State> {
         std::sync::Arc::new(State {
             workspace: ws.to_path_buf(),
             duckdb: std::path::PathBuf::from("duckdb"),
@@ -5609,11 +5735,12 @@ mod tests {
             runs: Mutex::new(std::collections::HashMap::new()),
             console: console_auth::Console::configure(ws, "127.0.0.1", None).unwrap(),
             host: "127.0.0.1".into(),
-            tick_interval: std::time::Duration::from_secs(15),
+            tick_interval: tick,
             oidc: None,
             oidc_endpoints: Mutex::new(None),
             oidc_logins: Mutex::new(Default::default()),
             unrecorded_deliveries: Mutex::new(Default::default()),
+            scheduler_heartbeat: std::sync::atomic::AtomicU64::new(crate::serve::unix_millis()),
         })
     }
 
@@ -5704,6 +5831,7 @@ mod tests {
             oidc_endpoints: Mutex::new(None),
             oidc_logins: Mutex::new(Default::default()),
             unrecorded_deliveries: Mutex::new(Default::default()),
+            scheduler_heartbeat: std::sync::atomic::AtomicU64::new(crate::serve::unix_millis()),
         })
     }
 
@@ -6910,6 +7038,7 @@ mod tests {
             oidc_endpoints: Mutex::new(None),
             oidc_logins: Mutex::new(Default::default()),
             unrecorded_deliveries: Mutex::new(Default::default()),
+            scheduler_heartbeat: std::sync::atomic::AtomicU64::new(crate::serve::unix_millis()),
         });
         let in_flight = std::sync::Arc::new(Mutex::new(std::collections::HashSet::new()));
         let cfg = serde_json::json!({
@@ -7407,6 +7536,7 @@ mod tests {
             oidc_endpoints: Mutex::new(None),
             oidc_logins: Mutex::new(Default::default()),
             unrecorded_deliveries: Mutex::new(Default::default()),
+            scheduler_heartbeat: std::sync::atomic::AtomicU64::new(crate::serve::unix_millis()),
         };
 
         let leaked = read_pipeline_file(&state, "connections/prod-db.json");
@@ -8063,6 +8193,7 @@ mod serve_honours_the_schedule {
             oidc_endpoints: Mutex::new(None),
             oidc_logins: Mutex::new(Default::default()),
             unrecorded_deliveries: Mutex::new(Default::default()),
+            scheduler_heartbeat: std::sync::atomic::AtomicU64::new(crate::serve::unix_millis()),
         };
         let projected = load_schedules(&state).expect("a projection");
         let one = projected.get("p").expect("the schedule");

@@ -795,20 +795,28 @@ duckle_runs_window{pipeline="nightly",status="error"} 3
 duckle_run_permits_total 4
 duckle_run_permits_free 0
 duckle_runs_in_flight 4
+duckle_scheduler_seconds_since_tick 9
 ```
 
 The run-history half is rendered by the engine, the same function that writes
 `logs/duckle_metrics.prom` for a node_exporter textfile collector - so the
 endpoint and the file cannot come to disagree about what a series means. What
 the endpoint adds is what a file cannot carry: what this process is doing right
-now. `duckle_run_permits_free` at zero for any length of time is runs queueing.
+now. `duckle_run_permits_free` at zero for any length of time is runs queueing,
+and `duckle_scheduler_seconds_since_tick` growing past a few tick intervals is a
+scheduler that has stopped: no schedule is firing.
 
 **Liveness and readiness are separate**, because they fail differently and an
 orchestrator acts differently on each: a process that is alive but not ready
 should stop receiving traffic, not be restarted. `/readyz` writes and deletes a
 probe file under `.duckle/`, so it catches a read-only mount or a full disk - the
 states that stop runs being recorded while every read still succeeds. It checks
-nothing external: a source being down is not this server being unready.
+nothing external: a source being down is not this server being unready. On
+`serve` it also checks the scheduler: a scheduler thread that has died or hung
+leaves the console answering every request while no schedule fires, which from
+outside looks exactly like a quiet night. Five missed ticks, and never under a
+minute, answer 503 naming it. The web editor schedules nothing and is not held
+to it.
 
 **Both probes are unauthenticated; `/metrics` is not.** A probe says the process
 is up and tells an anonymous caller nothing else. Pipeline names are the shape of
