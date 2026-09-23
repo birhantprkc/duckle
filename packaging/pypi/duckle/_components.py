@@ -412,7 +412,7 @@ COMPONENTS = {
     'snk.iceberg': {
         'kind': 'sink',
         'summary': 'Write a full Iceberg table (data/ + metadata/) via DuckDB v1.5',
-        'params': ['path'],
+        'params': ['catalog', 'path', 'catalogUri', 'warehouse', 'namespace', 'table', 'mode', 'authType', 'clientId', 'clientSecret', 'oauth2ServerUri', 'oauth2Scope', 'token', 'connectionRef', 'accessKey', 'secretKey', 'sessionToken', 'region', 'endpoint', 'urlStyle', 'useSsl'],
     },
     'snk.json': {
         'kind': 'sink',
@@ -893,7 +893,7 @@ COMPONENTS = {
     'src.iceberg': {
         'kind': 'source',
         'summary': 'Read Iceberg tables via DuckDB iceberg_scan',
-        'params': ['path'],
+        'params': ['catalog', 'path', 'catalogUri', 'warehouse', 'namespace', 'table', 'authType', 'clientId', 'clientSecret', 'oauth2ServerUri', 'oauth2Scope', 'token', 'connectionRef', 'accessKey', 'secretKey', 'sessionToken', 'region', 'endpoint', 'urlStyle', 'useSsl'],
     },
     'src.inline': {
         'kind': 'source',

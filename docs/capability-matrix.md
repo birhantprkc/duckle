@@ -155,7 +155,7 @@ How a sink writes, and what it does with rows it cannot.
 | `snk.spatial` | - | - | - |
 | `snk.ftp` | - | - | - |
 | `snk.huggingface` | - | - | - |
-| `snk.iceberg` | - | - | - |
+| `snk.iceberg` | append, overwrite | - | - |
 | `snk.ducklake` | overwrite, append, truncate, upsert, merge | - | - |
 | `snk.delta` | - | - | - |
 | `snk.postgres` | overwrite, append, upsert, truncate | - | - |
@@ -236,6 +236,7 @@ Components that take credentials. A saved connection keeps them out of the pipel
 | `snk.gizmosql` | sink | - | yes |
 | `snk.graphql` | sink | - | yes |
 | `snk.huggingface` | sink | - | yes |
+| `snk.iceberg` | sink | yes | yes |
 | `snk.lancedb` | sink | - | yes |
 | `snk.manticore` | sink | - | yes |
 | `snk.mariadb` | sink | yes | yes |
@@ -293,6 +294,7 @@ Components that take credentials. A saved connection keeps them out of the pipel
 | `src.http` | source | yes | yes |
 | `src.hubspot` | source | yes | yes |
 | `src.huggingface` | source | - | yes |
+| `src.iceberg` | source | yes | yes |
 | `src.intercom` | source | yes | yes |
 | `src.jira` | source | yes | yes |
 | `src.kafka` | source | - | yes |
