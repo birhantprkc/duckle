@@ -249,8 +249,14 @@ integration:minio:
         curl -fs http://minio:9000/minio/health/live > /dev/null && break;
         echo "Waiting for MinIO... ($i)"; sleep 2;
       done
-    # Seed bucket + a test object via DuckDB itself.
-    - $DUCKLE_DUCKDB_BIN :memory: -c "
+    # A fresh MinIO has no buckets and DuckDB cannot create one, so the COPY
+    # below failed. One SigV4-signed PUT makes it; curl has signed since 7.75.
+    - curl -fsS -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin http://minio:9000/duckle-test
+    # Seed a test object via DuckDB itself. A block scalar: as a plain scalar
+    # the `:memory: ` in it read as a mapping key, and the whole file failed to
+    # parse - so GitLab could not load this pipeline at all.
+    - |
+      $DUCKLE_DUCKDB_BIN :memory: -c "
         INSTALL httpfs; LOAD httpfs;
         CREATE OR REPLACE SECRET seed (
           TYPE S3, KEY_ID 'minioadmin', SECRET 'minioadmin',
