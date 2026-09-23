@@ -464,10 +464,14 @@ async function signOut(){
   await fetch('/api/session', { method: 'DELETE' });
   location.reload();
 }
-// The single quote and backtick are escaped too. This value is interpolated into
-  // single-quoted JS strings inside inline handlers, so without them a pipeline id -
-  // which an operator chooses - closes the string and runs as script.
+// HTML text and attribute values only. It is NOT enough for a JS string inside an
+  // inline handler: the HTML parser decodes &#39; back to ' before the handler is
+  // compiled, so an operator-chosen pipeline id would still close the string. Use jsq.
   function esc(s){ return (s==null?'':String(s)).replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c])); }
+// A value passed as an argument in an inline handler: a complete JS string literal,
+// encoded for JS first (JSON.stringify quotes and escapes it) and HTML second, the
+// reverse of the order the browser decodes them. Interpolate it bare, never quoted.
+function jsq(s){ return esc(JSON.stringify(s==null?'':String(s))); }
 function statusKey(s){ s=(s||'').toLowerCase(); if(s==='ok'||s==='successful')return 'ok'; if(s==='running')return 'run'; if(s)return 'err'; return 'none'; }
 function pill(s){ const k=statusKey(s); const t={ok:'Successful',err:'Failed',run:'Running',none:'Never run'}[k]; return `<span class="pill p-${k}">${t}</span>`; }
 function dot(s){ return `<span class="dot d-${statusKey(s)}"></span>`; }
@@ -578,7 +582,7 @@ function renderJobs(){
     const eff=p.running?'running':p.lastStatus;
     const nextHtml=p.running?'<span class="col-v">running now</span>':`<span class="col-v">${relFuture(p.nextRunAt)}</span>`;
     return `<div class="job ${open}" data-id="${esc(p.id)}">
-      <div class="job-head" onclick="toggleJob('${esc(p.id)}')">
+      <div class="job-head" onclick="toggleJob(${jsq(p.id)})">
         ${dot(eff)}
         <div><div class="job-name">${esc(p.name||p.id)} ${pill(eff)}</div><div class="job-file">${esc(p.file)} · ${p.nodeCount} nodes</div></div>
         <div>${schedHtml}</div>
@@ -587,7 +591,7 @@ function renderJobs(){
         <div><div class="col-k">Duration</div><div class="col-v">${fmtDur(p.lastDurationMs)}</div></div>
         <div><div class="col-k">${p.st.runs} run${p.st.runs===1?'':'s'} · ${p.st.rate==null?'-':p.st.rate+'%'}</div>${rate}</div>
         <div style="display:flex;gap:8px;align-items:center">
-          <button class="btn primary" onclick="event.stopPropagation();runJob('${esc(p.file)}','${esc(p.id)}',this)">Run</button>
+          <button class="btn primary" onclick="event.stopPropagation();runJob(${jsq(p.file)},${jsq(p.id)},this)">Run</button>
           <span class="caret">▸</span>
         </div>
       </div>
@@ -607,7 +611,7 @@ function fillJobBody(id){
     ? '<div class="muted" style="padding:10px 0">No runs yet for this pipeline.</div>'
     : '<table class="mini"><thead><tr><th>Status</th><th>When</th><th>Duration</th><th>Rows</th><th>Trigger</th><th></th></tr></thead><tbody>'
       + st.recent.map((r,i)=>`<tr><td>${pill(r.status)}</td><td>${fullTime(r.at)}</td><td>${fmtDur(r.durationMs)}</td><td>${fmtNum(r.rows)}</td><td class="muted">${esc(r.trigger||'-')}</td>`
-        + `<td><button class="btn" style="padding:3px 9px;font-size:12px" onclick="showLog('${esc(id)}','jb-${esc(id)}-${i}')">Logs</button></td></tr>`
+        + `<td><button class="btn" style="padding:3px 9px;font-size:12px" onclick="showLog(${jsq(id)},${jsq('jb-'+id+'-'+i)})">Logs</button></td></tr>`
         + `<tr id="jb-${esc(id)}-${i}" class="hidden"><td colspan="6"><div class="logbox">loading...</div></td></tr>`).join('')
       + '</tbody></table>';
   body.innerHTML=`<div id="params-${esc(id)}"></div>`+runs;
@@ -624,7 +628,7 @@ async function loadParams(file, id){
   box.innerHTML=`<div style="padding:10px 0;border-top:1px solid var(--line)">
     <div style="font-weight:600;margin-bottom:6px">Run parameters <span class="muted" style="font-weight:400">(leave blank to use the context default)</span></div>
     <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px">${names.map(n=>`<label class="muted" style="display:flex;flex-direction:column;gap:3px;font-size:12px">${esc(n)}<input type="text" data-param-name="${esc(n)}" placeholder="\${${esc(n)}}" style="font-size:13px;padding:5px 8px;min-width:170px"></label>`).join('')}</div>
-    <button class="btn primary" onclick="runJob('${esc(file)}','${esc(id)}',this)">Run with parameters</button>
+    <button class="btn primary" onclick="runJob(${jsq(file)},${jsq(id)},this)">Run with parameters</button>
   </div>`;
 }
 
@@ -643,7 +647,7 @@ function renderRuns(){
   $('runs-count').textContent=rows.length+' run'+(rows.length===1?'':'s');
   $('runs-empty').classList.toggle('hidden', rows.length>0);
   $('runs-body').innerHTML=rows.map((r,i)=>
-    `<tr class="run-row" onclick="showLog('${esc(r.id)}','rl-${i}')">
+    `<tr class="run-row" onclick="showLog(${jsq(r.id)},${jsq('rl-'+i)})">
       <td>${pill(r.status)}</td>
       <td>${esc(r.name||r.id)}${r.error?` <span class="err-text">${esc(r.error).slice(0,70)}</span>`:''}</td>
       <td>${fullTime(r.at)}</td><td>${fmtDur(r.durationMs)}</td><td>${fmtNum(r.rows)}</td>
@@ -693,8 +697,8 @@ function renderSchedules(){
         </select>
         <span class="muted" style="margin:0 4px">or cron</span>
         <input type="text" id="cr-${esc(p.id)}" value="${esc(sc.cron||'')}" placeholder="0 9 * * 1" title="5-field cron in local time (min hour day-of-month month day-of-week); overrides the interval when set" style="width:104px"></td>
-      <td style="text-align:right"><button class="btn" onclick="saveSched('${esc(p.id)}')">Save</button>
-        <button class="btn primary" onclick="runJob('${esc(p.file)}','${esc(p.id)}',this)">Run now</button></td>
+      <td style="text-align:right"><button class="btn" onclick="saveSched(${jsq(p.id)})">Save</button>
+        <button class="btn primary" onclick="runJob(${jsq(p.file)},${jsq(p.id)},this)">Run now</button></td>
     </tr>`;
   }).join('');
 }
@@ -826,8 +830,8 @@ async function loadBatches(){
       <td>${stalled ? `<span class="pill p-err">${b.failed}</span>` : '<span class="muted">0</span>'}</td>
       <td class="col-v">${b.lastActivity ? relTime(b.lastActivity) : '<span class="muted">not started</span>'}</td>
       <td style="text-align:right">
-        <button class="btn" onclick="openBatch('${esc(b.id)}')">Details</button>
-        ${stalled && canOperate() ? `<button class="btn" onclick="redriveBatch('${esc(b.id)}',this)">Retry failed</button>` : ''}
+        <button class="btn" onclick="openBatch(${jsq(b.id)})">Details</button>
+        ${stalled && canOperate() ? `<button class="btn" onclick="redriveBatch(${jsq(b.id)},this)">Retry failed</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -903,9 +907,9 @@ async function loadBackfills(){
       <td>${stuck ? `<span class="pill p-err">${stuck}</span>` : '<span class="muted">0</span>'}</td>
       <td class="col-v">${b.createdAt ? relTime(b.createdAt) : '<span class="muted">-</span>'}</td>
       <td style="text-align:right">
-        <button class="btn" onclick="openBackfill('${esc(b.id)}')">Details</button>
-        ${stuck && canOperate() ? `<button class="btn" onclick="retryBackfill('${esc(b.id)}',null,this)">Retry failed</button>` : ''}
-        ${c.open && canOperate() ? `<button class="btn" onclick="cancelBackfill('${esc(b.id)}',this)">Cancel</button>` : ''}
+        <button class="btn" onclick="openBackfill(${jsq(b.id)})">Details</button>
+        ${stuck && canOperate() ? `<button class="btn" onclick="retryBackfill(${jsq(b.id)},null,this)">Retry failed</button>` : ''}
+        ${c.open && canOperate() ? `<button class="btn" onclick="cancelBackfill(${jsq(b.id)},this)">Cancel</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -937,7 +941,7 @@ async function openBackfill(id){
       <td class="col-v">${p.finishedAt ? relTime(p.finishedAt) : '<span class="muted">-</span>'}</td>
       <td class="col-v" style="max-width:320px">${p.error ? esc(p.error) : ''}</td>
       <td style="text-align:right">${(p.state === 'failed' || p.state === 'interrupted') && canOperate()
-        ? `<button class="btn" onclick="retryBackfill('${esc(id)}','${esc(p.key)}',this)">Retry</button>` : ''}</td>
+        ? `<button class="btn" onclick="retryBackfill(${jsq(id)},${jsq(p.key)},this)">Retry</button>` : ''}</td>
     </tr>`).join('')}
     </tbody></table>
   </div>`;

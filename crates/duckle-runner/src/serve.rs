@@ -5129,6 +5129,49 @@ mod tests {
         serde_json::json!({ "name": "Orders", "nodes": [], "edges": [] })
     }
 
+    /// A value interpolated into an inline event handler goes through `jsq`, never `esc`.
+    ///
+    /// `esc` HTML-encodes a quote as `&#39;`, and the HTML parser decodes that entity
+    /// back to `'` BEFORE the handler source is compiled. So `toggleJob('${esc(id)}')`
+    /// with a pipeline file named `x');fetch('/api/admin/users',...);('` becomes a
+    /// handler that closes the string and runs the rest as script, in the session of
+    /// whoever clicks the row. A pipeline id is a file stem an Operator can choose
+    /// through the web editor's file API, and the viewer can be an Admin.
+    ///
+    /// `jsq` encodes for JS first and HTML second, which is the order the browser
+    /// undoes them in reverse.
+    #[test]
+    fn inline_handlers_encode_interpolated_values_for_javascript() {
+        let html = super::PANEL_HTML;
+        let mut handlers = Vec::new();
+        let mut rest = html;
+        // Every ` on<event>="..."` attribute, as the HTML parser would delimit it.
+        while let Some(at) = rest.find(" on") {
+            rest = &rest[at + 3..];
+            let name_len = rest.bytes().take_while(u8::is_ascii_lowercase).count();
+            if name_len == 0 || !rest[name_len..].starts_with("=\"") {
+                continue;
+            }
+            let body = &rest[name_len + 2..];
+            let Some(end) = body.find('"') else { break };
+            if body[..end].contains("${") {
+                handlers.push(body[..end].to_string());
+            }
+        }
+        // 13 handler attributes interpolate a value today. A lower count means the
+        // scan stopped seeing them, and "none are wrong" would then be vacuous.
+        assert!(handlers.len() >= 13, "found only {} interpolating handlers", handlers.len());
+        let wrong: Vec<&String> = handlers
+            .iter()
+            .filter(|h| h.split("${").skip(1).any(|v| !v.starts_with("jsq(")))
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "these handlers interpolate a value that is not JS-encoded, so an HTML entity \
+             decodes back into a quote before the script runs: {wrong:#?}"
+        );
+    }
+
     /// The point of the whole feature: a pipeline authored somewhere else arrives and is
     /// there afterwards.
     #[test]
