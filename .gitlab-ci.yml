@@ -231,7 +231,9 @@ integration:minio:
   <<: *rust_defaults
   stage: integration
   services:
-    - name: minio/minio:latest
+    # minio/minio is no longer pullable from Docker Hub; the same pinned quay.io
+    # image the GitHub minio and iceberg jobs use.
+    - name: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
       alias: minio
       command: ["server", "/data", "--console-address", ":9001"]
       variables:
