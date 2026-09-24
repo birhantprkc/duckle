@@ -61,6 +61,36 @@ const EMBEDDED_MCP: &[u8] = include_bytes!(env!("DUCKLE_EMBEDDED_MCP"));
 const EMBEDDED_LANCE: &[u8] = include_bytes!(env!("DUCKLE_EMBEDDED_LANCE"));
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The GDK backend to ask for before GTK starts on Linux, or why there is no
+/// window to open. Takes DISPLAY, WAYLAND_DISPLAY and GDK_BACKEND as set.
+///
+/// On Wayland, X11 first (through XWayland, the #169 workaround) and Wayland
+/// when there is no X server. X11 alone was #361: a Wayland session without
+/// XWayland had nowhere to open the window, and GTK panicked.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn gdk_backend_for(
+    display: Option<&str>,
+    wayland: Option<&str>,
+    chosen: Option<&str>,
+) -> Result<Option<&'static str>, String> {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.is_empty());
+    if set(chosen) {
+        return Ok(None);
+    }
+    if set(wayland) {
+        return Ok(Some("x11,wayland"));
+    }
+    if set(display) {
+        return Ok(None);
+    }
+    Err("Duckle cannot open its window: this session has no display (neither DISPLAY nor \
+         WAYLAND_DISPLAY is set), which is what a login over SSH or a server without a \
+         desktop looks like. Start it from a desktop session, or run it without a window: \
+         `Duckle-linux-x64 serve` runs the scheduler and the web console, and \
+         `Duckle-linux-x64 run` runs a pipeline."
+        .to_string())
+}
+
 pub fn run() {
     // #169: on Linux the webview is webkitgtk, whose GTK/GDK stack crashes at
     // startup on several Wayland compositors - reported on KDE Plasma 6 with the
@@ -71,10 +101,18 @@ pub fn run() {
     // override, and must be set before GTK initializes (before the builder).
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var_os("GDK_BACKEND").is_none()
-        {
-            std::env::set_var("GDK_BACKEND", "x11");
+        let var = |k: &str| std::env::var(k).ok();
+        match gdk_backend_for(
+            var("DISPLAY").as_deref(),
+            var("WAYLAND_DISPLAY").as_deref(),
+            var("GDK_BACKEND").as_deref(),
+        ) {
+            Ok(Some(backend)) => std::env::set_var("GDK_BACKEND", backend),
+            Ok(None) => {}
+            Err(why) => {
+                eprintln!("{why}");
+                std::process::exit(1);
+            }
         }
         if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
@@ -2471,6 +2509,34 @@ fn mcp_inject_config(app: tauri::AppHandle, client: String) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #361: on a Wayland session with no X server the window never opened -
+    /// "Failed to initialize gtk backend!" - because the #169 workaround sent
+    /// GTK to X11 whenever WAYLAND_DISPLAY was set, and there was no X11 to go
+    /// to. Reproduced with the v0.7.3 binary under a headless Weston: X11 alone
+    /// panics, "x11,wayland" opens the window. X11 is still tried first, so the
+    /// #169 fix holds wherever XWayland is running.
+    #[test]
+    fn gtk_falls_back_to_wayland_when_there_is_no_x_server() {
+        assert_eq!(gdk_backend_for(None, Some("wayland-0"), None), Ok(Some("x11,wayland")));
+        assert_eq!(gdk_backend_for(Some(":0"), Some("wayland-0"), None), Ok(Some("x11,wayland")));
+        assert_eq!(gdk_backend_for(Some(":0"), None, None), Ok(None));
+        // A backend the user chose is theirs, whatever else is set.
+        assert_eq!(gdk_backend_for(None, Some("wayland-0"), Some("wayland")), Ok(None));
+        assert_eq!(gdk_backend_for(None, None, Some("broadway")), Ok(None));
+    }
+
+    /// #361, the other way to get the same panic: no display at all, as over
+    /// SSH or on a server. That is said, with where to go instead, rather than
+    /// a panic from inside the windowing toolkit. An empty variable is unset.
+    #[test]
+    fn a_session_with_no_display_is_told_so_rather_than_panicking() {
+        for (display, wayland) in [(None, None), (Some(""), Some(""))] {
+            let why = gdk_backend_for(display, wayland, None).unwrap_err();
+            assert!(why.contains("DISPLAY") && why.contains("WAYLAND_DISPLAY"), "{why}");
+            assert!(why.contains("serve"), "names the way to run without a window: {why}");
+        }
+    }
 
     /// Sidecars are extracted and then EXECUTED, so where they are staged is a
     /// security boundary. It used to be the shared temp directory under a name
