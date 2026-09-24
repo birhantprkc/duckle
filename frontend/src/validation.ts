@@ -128,6 +128,9 @@ export function validatePipeline(
             'options', 'connParams',
             'loginUrl', 'clientId', 'clientSecret', 'instanceUrl',
             'accessToken', 'authToken', 'authType', 'authMode', 'account',
+            // SQL Server / Synapse call the login `user`; the connection stores
+            // `username` and the merge maps it across (#363).
+            'user',
         ]);
         const ref = props['connectionRef'];
         const hasConnection = typeof ref === 'string' && ref !== '';

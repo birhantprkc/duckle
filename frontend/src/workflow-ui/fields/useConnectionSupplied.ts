@@ -22,7 +22,9 @@ export function useConnectionSupplied(fieldKey: string): string | undefined {
 
     const item = repoItems.find(i => i.type === 'connection' && i.id === ref);
     const payload = item?.payload as Record<string, unknown> | undefined;
-    const v = payload?.[fieldKey];
+    // SQL Server / Synapse call the login `user`; the connection stores it as
+    // `username`, which the run-time merge maps across (#363).
+    const v = payload?.[fieldKey] ?? (fieldKey === 'user' ? payload?.['username'] : undefined);
     if (v === undefined || v === null || v === '') return undefined;
     if (typeof v === 'object') return undefined;
     return String(v);

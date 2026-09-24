@@ -8,13 +8,15 @@ import type { DuckleNodeData } from '../pipeline-types';
 type Props = {
     nodes: Node<DuckleNodeData>[];
     edges: Edge[];
+    /** Saved connections resolve from here, as they do for a run (#363). */
+    workspacePath: string | null;
 };
 
 // Live view of the compiled DuckDB SQL. Recompiles whenever the graph
 // changes so the user can see exactly what each node lowers to (and
 // catch planner-time errors - missing columns, bad joins - without
 // having to run the pipeline).
-export default function PlanView({ nodes, edges }: Props) {
+export default function PlanView({ nodes, edges, workspacePath }: Props) {
     const [stages, setStages] = useState<StageSql[] | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -31,7 +33,7 @@ export default function PlanView({ nodes, edges }: Props) {
         // the user edits node properties.
         const handle = setTimeout(async () => {
             try {
-                const result = await compilePipelineSql(nodes, edges);
+                const result = await compilePipelineSql(nodes, edges, workspacePath);
                 if (cancelled) return;
                 if (result === null) {
                     setStages(null);
@@ -52,7 +54,7 @@ export default function PlanView({ nodes, edges }: Props) {
             cancelled = true;
             clearTimeout(handle);
         };
-    }, [nodes, edges]);
+    }, [nodes, edges, workspacePath]);
 
     if (nodes.length === 0) {
         return (

@@ -1660,7 +1660,7 @@ export default function App() {
         // failure (so the Plan tab can show it). For copy/export we just
         // can't produce SQL in that case, so treat it as "nothing to do".
         try {
-            const stages = await compilePipelineSql(nodes, edges);
+            const stages = await compilePipelineSql(nodes, edges, workspacePathState);
             if (!stages) return null;
             return stages
                 .map(
@@ -1672,7 +1672,7 @@ export default function App() {
             console.warn('buildSqlText: pipeline does not compile', err);
             return null;
         }
-    }, [nodes, edges]);
+    }, [nodes, edges, workspacePathState]);
 
     const handleCopySql = useCallback(async () => {
         const text = await buildSqlText();

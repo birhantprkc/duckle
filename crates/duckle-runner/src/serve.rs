@@ -1140,6 +1140,12 @@ fn dispatch_cmd(state: &WebState, who: &console_auth::Identity, cmd: &str, body:
                 Err(e) => return respond_err("400 Bad Request", &format!("bad pipeline: {}", e)),
             };
             duckle_duckdb_engine::context::apply_workspace_context(&mut doc, &state.workspace);
+            // Saved connections resolve as a run resolves them (#363), so a node
+            // that takes its host from one plans instead of "host required".
+            // compile_pipeline_sql still replaces secret values with placeholders.
+            if let Err(e) = duckle_secrets::resolve_connection_refs(&state.workspace, &mut doc.nodes) {
+                return respond_err("400 Bad Request", &e);
+            }
             match duckle_duckdb_engine::compile_pipeline_sql(&doc) {
                 Ok(stages) => match serde_json::to_value(&stages) {
                     Ok(v) => respond_json(&v),
@@ -1526,10 +1532,17 @@ fn inspect_schema(state: &WebState, body: &[u8]) -> Reply {
     if format.is_empty() {
         return respond_err("400 Bad Request", "inspect: missing format");
     }
-    let options = args
+    let mut options = args
         .get("options")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    // #363: a node on a saved connection autodetects with the connection's
+    // fields, as it runs, instead of failing "host required".
+    if let Err(e) =
+        duckle_secrets::resolve_connection_ref_props(&state.workspace, &format!("src.{}", format), &mut options)
+    {
+        return respond_err("400 Bad Request", &e);
+    }
     let engine = DuckdbEngine::new(state.duckdb.clone());
     match engine.inspect(format, options) {
         Ok(insp) => respond_json(&serde_json::json!({ "columns": insp.schema, "sampleRows": insp.sample_rows }),

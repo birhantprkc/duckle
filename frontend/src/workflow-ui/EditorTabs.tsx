@@ -125,7 +125,7 @@ export default function EditorTabs({
                     />
                 </div>
                 <div className={'tab-panel' + (active === 'plan' ? ' tab-panel-active' : '')}>
-                    <PlanView nodes={planNodes} edges={edges} />
+                    <PlanView nodes={planNodes} edges={edges} workspacePath={workspacePath} />
                 </div>
                 <div className={'tab-panel' + (active === 'run' ? ' tab-panel-active' : '')}>
                     <RunView

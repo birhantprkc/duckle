@@ -701,6 +701,14 @@ fn merge_generic_connection(
             map.insert("account".into(), JsonValue::String(h.into()));
         }
     }
+    // SQL Server and Synapse nodes name the login `user`, where the connection
+    // stores `username` (#363). Without this the connection's user never
+    // reached the node, and a node that relied on its connection ran as nobody.
+    if matches!(component_id, "src.sqlserver" | "snk.sqlserver" | "src.synapse" | "snk.synapse") {
+        if let Some(u) = conn_str(conn, "username") {
+            map.insert("user".into(), JsonValue::String(u.into()));
+        }
+    }
     Ok(())
 }
 
@@ -1309,6 +1317,52 @@ mod tests {
         let p = node.data.properties.unwrap();
         assert_eq!(p["account"], "acme-xy12345");
         assert_eq!(p["username"], "u");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// #363: SQL Server and Synapse nodes name the login `user`; a saved
+    /// connection stores it as `username`. Nothing mapped one to the other, so a
+    /// node that took everything from its connection ran as nobody and failed
+    /// "user required", with the user sitting in the connection.
+    #[test]
+    fn a_sql_server_connection_supplies_the_user_its_nodes_read() {
+        let ws = temp_ws("mssql");
+        write_connection(
+            &ws,
+            "prod",
+            r#"{"kind":"sqlserver","host":"db.local","port":1433,"database":"sales","username":"etl","password":"p"}"#,
+        );
+        for component in ["src.sqlserver", "snk.sqlserver", "src.synapse", "snk.synapse"] {
+            let mut node = sf_node(component, serde_json::json!({"connectionRef": "prod"}));
+            resolve_connection_refs(&ws, std::slice::from_mut(&mut node)).unwrap();
+            let p = node.data.properties.unwrap();
+            assert_eq!(p["user"], "etl", "{component}: {p}");
+            assert_eq!(p["host"], "db.local", "{component}");
+            assert_eq!(p["database"], "sales", "{component}");
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// #363: Autodetect reads one node's properties, not a pipeline. A node that
+    /// takes its host from a saved connection has to have it resolved there too,
+    /// or the Schema tab fails "host required" while the run works.
+    #[test]
+    fn one_nodes_properties_resolve_their_saved_connection() {
+        let ws = temp_ws("props");
+        write_connection(
+            &ws,
+            "prod",
+            r#"{"kind":"sqlserver","host":"db.local","database":"sales","username":"etl","password":"p"}"#,
+        );
+        let mut props = serde_json::json!({ "connectionRef": "prod", "tableName": "orders" });
+        resolve_connection_ref_props(&ws, "src.sqlserver", &mut props).unwrap();
+        assert_eq!(props["host"], "db.local");
+        assert_eq!(props["user"], "etl");
+        assert_eq!(props["tableName"], "orders", "the node's own fields stay");
+        // No ref, nothing to do.
+        let mut plain = serde_json::json!({ "host": "h" });
+        resolve_connection_ref_props(&ws, "src.sqlserver", &mut plain).unwrap();
+        assert_eq!(plain, serde_json::json!({ "host": "h" }));
         let _ = std::fs::remove_dir_all(&ws);
     }
 

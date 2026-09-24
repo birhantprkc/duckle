@@ -2,6 +2,7 @@ import type { ComponentDef } from './workflow-ui/palette-data';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { isTauri } from './tauri-dialog';
 import { isWebBackend } from './web-fs';
+import { getWorkspacePath } from './workspace';
 import type { Column } from './pipeline-types';
 import type { Edge, Node } from '@xyflow/react';
 import type { DuckleNodeData } from './pipeline-types';
@@ -30,7 +31,12 @@ export async function tauriAutodetect(
 ): Promise<AutodetectPayload | null> {
     if (isTauri()) {
         try {
-            return await invoke<AutodetectPayload>('autodetect_schema', { format, options });
+            // The workspace resolves a saved connection the node refers to (#363).
+            return await invoke<AutodetectPayload>('autodetect_schema', {
+                format,
+                options,
+                workspacePath: getWorkspacePath(),
+            });
         } catch (err) {
             const message =
                 typeof err === 'string' ? err : err instanceof Error ? err.message : String(err);
@@ -803,6 +809,8 @@ export type StageSql = {
 export async function compilePipelineSql(
     nodes: Node<DuckleNodeData>[],
     edges: Edge[],
+    // The workspace to resolve saved connections from, as a run does (#363).
+    workspacePath?: string | null,
 ): Promise<StageSql[] | null> {
     // null = compilation not available (web build / no Tauri). A real
     // compile failure THROWS the engine's error string so callers (the
@@ -812,6 +820,7 @@ export async function compilePipelineSql(
     if (!isTauri() && !isWebBackend()) return null;
     return await invoke<StageSql[]>('compile_pipeline', {
         pipeline: { nodes, edges },
+        workspacePath: workspacePath ?? null,
     });
 }
 

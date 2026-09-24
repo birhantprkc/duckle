@@ -534,6 +534,29 @@ function context(name: string, vars: Record<string, string>): RepoItem {
 }
 
 // ---------------------------------------------------------------------------
+// #363: a SQL Server node that takes everything from a saved connection is
+// complete. Its form names the login `user`; the connection stores `username`,
+// and the engine now maps one to the other, so asking for User here refused a
+// run that would work.
+// ---------------------------------------------------------------------------
+{
+    const asked = (props: Record<string, unknown>) =>
+        validatePipeline([node('s', 'src.sqlserver', props)], [])
+            .issues.filter(i => i.code === 'missing-required-field')
+            .map(i => i.message);
+    check(
+        'connection: a SQL Server node on a saved connection is not asked for its user',
+        asked({ connectionRef: 'prod', tableName: 'orders' }).length === 0,
+        `issues: ${JSON.stringify(asked({ connectionRef: 'prod', tableName: 'orders' }))}`,
+    );
+    check(
+        'connection: without a connection, the user is still asked for',
+        asked({ host: 'db', database: 'sales', tableName: 'orders' }).some(m => m.includes("'User'")),
+        `issues: ${JSON.stringify(asked({ host: 'db', database: 'sales', tableName: 'orders' }))}`,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // SQL names that differ only in case are the same name.
 //
 // A SQL name becomes a DuckDB view, and DuckDB identifiers are case-insensitive:

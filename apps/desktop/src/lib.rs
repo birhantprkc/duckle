@@ -380,8 +380,23 @@ fn engine() -> Result<DuckdbEngine, String> {
 #[tauri::command]
 async fn autodetect_schema(
     format: String,
-    options: JsonValue,
+    mut options: JsonValue,
+    workspace_path: Option<String>,
 ) -> Result<InspectionPayload, String> {
+    // #363: a node on a saved connection autodetects the way it runs, with the
+    // connection's fields, instead of failing "host required".
+    let refers = options.get("connectionRef").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty());
+    match workspace_path.as_deref().filter(|w| !w.is_empty()) {
+        Some(ws) => duckle_secrets::resolve_connection_ref_props(
+            std::path::Path::new(ws),
+            &format!("src.{}", format),
+            &mut options,
+        )?,
+        None if refers => {
+            return Err("this node uses a saved connection; open a workspace so it can be resolved".into())
+        }
+        None => {}
+    }
     let inspection = match engine() {
         Ok(eng) => match eng.inspect(&format, options.clone()) {
             Ok(insp) => insp,
@@ -701,8 +716,14 @@ fn cancel_pipeline() -> Result<(), String> {
 /// Compile a pipeline to DuckDB SQL without executing. Used by the
 /// "Copy SQL" / "Export SQL" features so users can copy the generated
 /// statements out of the app.
+///
+/// Saved connections are resolved first, as a run resolves them (#363): a node
+/// that takes its host from a connection otherwise failed "host required" here
+/// while the same pipeline ran. Secret values are still replaced with named
+/// placeholders by `compile_pipeline_sql`.
 #[tauri::command]
-fn compile_pipeline(pipeline: PipelineDoc) -> Result<Vec<StageSql>, String> {
+fn compile_pipeline(mut pipeline: PipelineDoc, workspace_path: Option<String>) -> Result<Vec<StageSql>, String> {
+    resolve_saved_connections(&mut pipeline, &workspace_path)?;
     compile_pipeline_sql(&pipeline).map_err(|e| e.to_string())
 }
 
@@ -2509,6 +2530,34 @@ fn mcp_inject_config(app: tauri::AppHandle, client: String) -> Result<String, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #363: Plan compiled the pipeline without resolving its saved
+    /// connections, so a SQL Server node that took its host from one failed
+    /// "host required" in Plan while the same pipeline ran. Plan now resolves
+    /// them the way Run does.
+    #[test]
+    fn plan_resolves_saved_connections_like_run() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("connections")).unwrap();
+        std::fs::write(
+            ws.path().join("connections").join("prod.json"),
+            r#"{"kind":"sqlserver","host":"db.local","port":1433,"database":"sales","username":"etl","password":"p"}"#,
+        )
+        .unwrap();
+        let pipeline: PipelineDoc = serde_json::from_value(serde_json::json!({
+            "nodes": [{ "id": "s", "position": { "x": 0, "y": 0 },
+                        "data": { "label": "s", "componentId": "src.sqlserver",
+                                  "properties": { "connectionRef": "prod", "tableName": "orders" } } }],
+            "edges": []
+        }))
+        .unwrap();
+        let stages = compile_pipeline(pipeline.clone(), Some(ws.path().to_string_lossy().into_owned()))
+            .expect("Plan resolves the connection");
+        assert_eq!(stages.len(), 1);
+        // With no workspace to resolve it from, the reason is said.
+        let err = compile_pipeline(pipeline, None).unwrap_err();
+        assert!(err.contains("saved connection"), "{err}");
+    }
 
     /// #361: on a Wayland session with no X server the window never opened -
     /// "Failed to initialize gtk backend!" - because the #169 workaround sent
