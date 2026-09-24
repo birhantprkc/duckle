@@ -4202,12 +4202,20 @@ impl DuckdbEngine {
             // chrono::DateTime<FixedOffset> (or Utc), NOT a Naive* type, so
             // the naive probes below would all miss and it became NULL.
             // Emit an RFC3339 string preserving the original offset.
+            // #362: every date/time is written in one fixed shape the column's
+            // DuckDB type parses, and `sqlserver_column_type` then types the
+            // column from what the server said it is. The shapes used to vary
+            // with the value: `%.f` wrote nanoseconds (".123333333" for a
+            // datetime's 1/300 s ticks, nine digits for a datetime2), which
+            // DuckDB's type guess refuses, so a column with a fraction in it
+            // came back VARCHAR while its whole-second neighbour was a TIMESTAMP.
             ColumnType::DatetimeOffsetn => {
+                const OFFSET: &str = "%Y-%m-%d %H:%M:%S%.6f%:z";
                 if let Ok(Some(dt)) = row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(i) {
-                    return JsonValue::String(dt.to_rfc3339());
+                    return JsonValue::String(dt.format(OFFSET).to_string());
                 }
                 if let Ok(Some(dt)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(i) {
-                    return JsonValue::String(dt.to_rfc3339());
+                    return JsonValue::String(dt.format(OFFSET).to_string());
                 }
                 return row
                     .try_get::<&str, _>(i)
@@ -4230,13 +4238,28 @@ impl DuckdbEngine {
                 // DuckDB's read_json_auto which re-parses them as
                 // TIMESTAMP / DATE / TIME.
                 if let Ok(Some(dt)) = row.try_get::<chrono::NaiveDateTime, _>(i) {
-                    return JsonValue::String(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string());
+                    // A classic datetime counts in 1/300 s ticks and SQL Server
+                    // shows it to the millisecond (".123" is 37 ticks, not
+                    // ".123333"), so it is rounded there. datetime2 is kept to
+                    // the microsecond, which is what a DuckDB TIMESTAMP holds.
+                    let classic = matches!(
+                        col.column_type(),
+                        ColumnType::Datetime | ColumnType::Datetime4 | ColumnType::Datetimen
+                    );
+                    let dt = if classic {
+                        let nanos = dt.and_utc().timestamp_subsec_nanos() as i64;
+                        dt - chrono::Duration::nanoseconds(nanos)
+                            + chrono::Duration::milliseconds((nanos + 500_000) / 1_000_000)
+                    } else {
+                        dt
+                    };
+                    return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string());
                 }
                 if let Ok(Some(d)) = row.try_get::<chrono::NaiveDate, _>(i) {
                     return JsonValue::String(d.format("%Y-%m-%d").to_string());
                 }
                 if let Ok(Some(t)) = row.try_get::<chrono::NaiveTime, _>(i) {
-                    return JsonValue::String(t.format("%H:%M:%S%.f").to_string());
+                    return JsonValue::String(t.format("%H:%M:%S%.6f").to_string());
                 }
                 row.try_get::<&str, _>(i)
                     .ok()
@@ -14806,7 +14829,7 @@ impl DuckdbEngine {
         // &Path is Copy; capture it for the async block (block_on is scoped,
         // so this never outlives &self).
         let bin = self.binary();
-        let count: usize = rt
+        let count = rt
             .block_on(async move {
                 use futures_util::TryStreamExt;
                 use tiberius::QueryItem;
@@ -14837,6 +14860,7 @@ impl DuckdbEngine {
                     .await
                     .map_err(|e| format!("query: {}", e))?;
                 let mut count = 0_usize;
+                let mut typed: Vec<(String, &'static str)> = Vec::new();
                 while let Some(item) = stream
                     .try_next()
                     .await
@@ -14844,7 +14868,18 @@ impl DuckdbEngine {
                 {
                     let row = match item {
                         QueryItem::Row(r) => r,
-                        QueryItem::Metadata(_) => continue,
+                        QueryItem::Metadata(meta) => {
+                            if typed.is_empty() {
+                                typed = meta
+                                    .columns()
+                                    .iter()
+                                    .filter_map(|c| {
+                                        sqlserver_column_type(c.column_type()).map(|t| (c.name().to_string(), t))
+                                    })
+                                    .collect();
+                            }
+                            continue;
+                        }
                     };
                     let mut obj = serde_json::Map::new();
                     for (i, col) in row.columns().iter().enumerate() {
@@ -14859,9 +14894,30 @@ impl DuckdbEngine {
                 writer
                     .finalize_into_table(bin, db, &spec.node_id)
                     .map_err(|e| format!("finalize: {}", e))?;
-                Ok::<usize, String>(count)
+                Ok::<(usize, Vec<(String, &'static str)>), String>((count, typed))
             })
             .map_err(|e| EngineError::Query(format!("sqlserver source: {}", e)))?;
+        let (count, typed) = count;
+        // The date/time columns take the type the server reported rather than
+        // one guessed from their text, which a guess got wrong (#362). CAST,
+        // not TRY_CAST: the text is written above in the one shape each type
+        // parses, so a value that fails is a bug to see, not a NULL to hide.
+        if count > 0 && !typed.is_empty() {
+            let replace = typed
+                .iter()
+                .map(|(name, ty)| {
+                    let q = plan::quote_ident(name);
+                    format!("CAST({q} AS {ty}) AS {q}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let node = plan::quote_ident(&spec.node_id);
+            self.run(
+                Some(db),
+                &format!("CREATE OR REPLACE TABLE {node} AS SELECT * REPLACE ({replace}) FROM {node};"),
+                false,
+            )?;
+        }
         Ok(format!(
             "sqlserver: materialized {} rows into {}",
             count, spec.node_id

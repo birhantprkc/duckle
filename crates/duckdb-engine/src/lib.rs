@@ -6134,6 +6134,22 @@ mod cql_value_tests {
 /// - num   -> verbatim
 /// - str   -> 'escaped' (single quotes doubled)
 /// - obj/arr -> PARSE_JSON('escaped json') so it lands in a VARIANT column
+/// The DuckDB type for a SQL Server date/time column, from the type the
+/// server reports for it (#362). None for everything else, whose JSON values
+/// carry their type well enough.
+fn sqlserver_column_type(t: tiberius::ColumnType) -> Option<&'static str> {
+    use tiberius::ColumnType;
+    match t {
+        ColumnType::Datetime | ColumnType::Datetime2 | ColumnType::Datetime4 | ColumnType::Datetimen => {
+            Some("TIMESTAMP")
+        }
+        ColumnType::Daten => Some("DATE"),
+        ColumnType::Timen => Some("TIME"),
+        ColumnType::DatetimeOffsetn => Some("TIMESTAMPTZ"),
+        _ => None,
+    }
+}
+
 /// Render a SQL Server NUMERIC/DECIMAL as an exact decimal string from
 /// tiberius' unscaled i128 value + scale. tiberius' own Display formats
 /// the integer and fractional parts independently and signs both, so a
