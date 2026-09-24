@@ -19401,25 +19401,39 @@ fn access_param(
 /// so "new.accdb" became "new.accdb.mdb".
 #[cfg(all(windows, feature = "odbc"))]
 fn create_access_file(path: &str) -> Result<(), EngineError> {
-    // The SDK's odbccp32.lib is a static stub that loads odbccp32.dll itself,
-    // so its functions are plain symbols, not `__imp_` imports: linked as a
-    // static library, and left unbundled for the final link to find.
-    #[link(name = "odbccp32", kind = "static", modifiers = "-bundle")]
-    extern "system" {
-        fn SQLConfigDataSourceW(
-            hwnd: *mut std::ffi::c_void,
-            request: u16,
-            driver: *const u16,
-            attributes: *const u16,
-        ) -> i32;
-        fn SQLInstallerErrorW(
-            error: u16,
-            code: *mut u32,
-            message: *mut u16,
-            max: u16,
-            len: *mut u16,
-        ) -> i16;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    type ConfigDataSource =
+        unsafe extern "system" fn(*mut std::ffi::c_void, u16, *const u16, *const u16) -> i32;
+    type InstallerError = unsafe extern "system" fn(u16, *mut u32, *mut u16, u16, *mut u16) -> i16;
+    // The ODBC installer DLL, loaded here rather than through the SDK's
+    // odbccp32.lib. That library is a stub that loads the DLL itself and, when
+    // it cannot, shows a message box: a dialog nobody can answer in a headless
+    // `serve`. Loaded by hand, a missing piece is an error the run reports.
+    let missing = |what: &str| {
+        EngineError::Query(format!(
+            "access: could not create {}: the ODBC installer ({}) is not available",
+            path, what
+        ))
+    };
+    let dll: Vec<u16> = "odbccp32.dll".encode_utf16().chain([0]).collect();
+    // SAFETY: a NUL-terminated UTF-16 name; the module stays loaded for the
+    // process, so the function pointers below never dangle.
+    let module = unsafe { LoadLibraryW(dll.as_ptr()) };
+    if module.is_null() {
+        return Err(missing("odbccp32.dll"));
     }
+    // SAFETY: each name is NUL-terminated ASCII, and each pointer is cast to
+    // the signature the ODBC installer API documents for that function.
+    let (config, installer_error) = unsafe {
+        let config = GetProcAddress(module, b"SQLConfigDataSourceW\0".as_ptr())
+            .ok_or_else(|| missing("SQLConfigDataSourceW"))?;
+        let error = GetProcAddress(module, b"SQLInstallerErrorW\0".as_ptr())
+            .ok_or_else(|| missing("SQLInstallerErrorW"))?;
+        (
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, ConfigDataSource>(config),
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, InstallerError>(error),
+        )
+    };
     const ODBC_ADD_DSN: u16 = 1;
     let native = path.replace('/', "\\");
     if let Some(parent) = Path::new(&native).parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -19436,7 +19450,7 @@ fn create_access_file(path: &str) -> Result<(), EngineError> {
     // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call,
     // and a null window handle means no dialog.
     let ok = unsafe {
-        SQLConfigDataSourceW(std::ptr::null_mut(), ODBC_ADD_DSN, driver.as_ptr(), attributes.as_ptr())
+        config(std::ptr::null_mut(), ODBC_ADD_DSN, driver.as_ptr(), attributes.as_ptr())
     };
     if ok != 0 {
         return Ok(());
@@ -19444,7 +19458,7 @@ fn create_access_file(path: &str) -> Result<(), EngineError> {
     let (mut code, mut len) = (0u32, 0u16);
     let mut message = [0u16; 512];
     // SAFETY: the buffer and its length agree, and the out-pointers are live.
-    let rc = unsafe { SQLInstallerErrorW(1, &mut code, message.as_mut_ptr(), message.len() as u16, &mut len) };
+    let rc = unsafe { installer_error(1, &mut code, message.as_mut_ptr(), message.len() as u16, &mut len) };
     let why = if rc >= 0 {
         String::from_utf16_lossy(&message[..(len as usize).min(message.len())])
     } else {

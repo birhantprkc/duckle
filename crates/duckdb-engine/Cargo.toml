@@ -293,4 +293,4 @@ libc = "0.2"
 # no equivalent of on Windows. 0.61 is already compiled into the tree for tokio,
 # so this adds two feature flags rather than a dependency.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
