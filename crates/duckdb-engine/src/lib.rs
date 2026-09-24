@@ -2562,6 +2562,8 @@ impl DuckdbEngine {
                     Some(RuntimeSpec::TursoSink(spec)) => self.run_turso_sink(&db_path, spec),
                     Some(RuntimeSpec::Db2Source(spec)) => self.run_db2_source(&db_path, spec),
                     Some(RuntimeSpec::Db2Sink(spec)) => self.run_db2_sink(&db_path, spec),
+                    Some(RuntimeSpec::AccessSource(spec)) => self.run_access_source(&db_path, spec),
+                    Some(RuntimeSpec::AccessSink(spec)) => self.run_access_sink(&db_path, spec),
                     Some(RuntimeSpec::ClickhouseSink(spec)) => {
                         self.run_clickhouse_sink(&db_path, spec)
                     }

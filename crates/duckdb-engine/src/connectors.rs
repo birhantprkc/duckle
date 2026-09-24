@@ -4486,7 +4486,7 @@ impl DuckdbEngine {
         batch_rows: usize,
         node_id: &str,
     ) -> Result<String, EngineError> {
-        use odbc_api::buffers::TextRowSet;
+        use odbc_api::buffers::{ColumnarBuffer, TextColumn};
         use odbc_api::{ColumnDescription, ConnectionOptions, Cursor, Environment, ResultSetMetadata};
 
         let env = Environment::new()
@@ -4536,10 +4536,36 @@ impl DuckdbEngine {
         // Fetch in batches as text, writing each row to the NDJSON file. ODBC
         // text rendering keeps the source's textual form; the typed finalize
         // casts each column afterwards.
+        //
+        // Wide (UTF-16) text on Windows. A narrow buffer there is filled in the
+        // machine's ANSI code page, not UTF-8, so every accented letter from an
+        // ODBC source on Windows came back as a replacement character. Elsewhere
+        // the driver managers speak UTF-8 in narrow buffers, which stays as it was.
         let mut writer = JsonLinesWriter::open(node_id)?;
         let batch = batch_rows.max(1);
-        let buffers = TextRowSet::for_cursor(batch, &mut cursor, Some(65536))
-            .map_err(|e| EngineError::Query(format!("{}: alloc buffers: {}", family, e)))?;
+        let mut columns: Vec<(u16, TextColumn<OdbcChar>)> = Vec::with_capacity(ncols as usize);
+        for i in 1..=ncols {
+            let data_type = cursor
+                .col_data_type(i)
+                .map_err(|e| EngineError::Query(format!("{}: column {} type: {}", family, i, e)))?;
+            #[cfg(windows)]
+            let encoded = data_type.utf16_len();
+            #[cfg(not(windows))]
+            let encoded = data_type.utf8_len();
+            let len = match encoded {
+                Some(n) => Some(n),
+                None => cursor
+                    .col_display_size(i)
+                    .map_err(|e| EngineError::Query(format!("{}: column {} size: {}", family, i, e)))?,
+            };
+            // Capped, as before: a driver that reports no size or a huge one
+            // would otherwise size the buffer from nothing or from gigabytes.
+            let len = len.map(|n| n.get()).unwrap_or(65536).min(65536);
+            let column = TextColumn::try_new(batch, len)
+                .map_err(|e| EngineError::Query(format!("{}: alloc buffers: {:?}", family, e)))?;
+            columns.push((i, column));
+        }
+        let buffers = ColumnarBuffer::new(columns);
         let mut rows_cursor = cursor
             .bind_buffer(buffers)
             .map_err(|e| EngineError::Query(format!("{}: bind buffers: {}", family, e)))?;
@@ -4552,10 +4578,8 @@ impl DuckdbEngine {
             for r in 0..view.num_rows() {
                 let mut obj = serde_json::Map::with_capacity(names.len());
                 for (c, name) in names.iter().enumerate() {
-                    let v = match view.at(c, r) {
-                        Some(bytes) => {
-                            JsonValue::String(String::from_utf8_lossy(bytes).into_owned())
-                        }
+                    let v = match view.column(c).get(r) {
+                        Some(chars) => JsonValue::String(odbc_text(chars)),
                         None => JsonValue::Null,
                     };
                     obj.insert(name.clone(), v);
@@ -4835,6 +4859,247 @@ impl DuckdbEngine {
     ) -> Result<String, EngineError> {
         Err(EngineError::Config(
             "db2: this build was compiled without ODBC support (enable the `db2` feature)".into(),
+        ))
+    }
+
+    /// Microsoft Access, read. On Windows the Access ODBC driver runs the query
+    /// and types every column. Nowhere else has that driver, so there a table
+    /// is read through mdbtools, which can export a table but not run SQL.
+    pub(crate) fn run_access_source(
+        &self,
+        db: &Path,
+        spec: &plan::AccessSourceSpec,
+    ) -> Result<String, EngineError> {
+        if !Path::new(&spec.path).is_file() {
+            return Err(EngineError::Config(format!("access: {} is not a file", spec.path)));
+        }
+        #[cfg(all(windows, feature = "odbc"))]
+        {
+            let query = match (&spec.query, &spec.table) {
+                (Some(q), _) => q.clone(),
+                (None, Some(t)) => format!("SELECT * FROM {}", access_ident(t)?),
+                (None, None) => {
+                    return Err(EngineError::Config("access: tableName or query required".into()))
+                }
+            };
+            self.run_odbc_source(
+                db,
+                "access",
+                &access_conn_string(&spec.path, spec.password.as_deref(), false),
+                &query,
+                spec.batch_rows,
+                &spec.node_id,
+            )
+        }
+        #[cfg(not(all(windows, feature = "odbc")))]
+        {
+            self.run_access_mdbtools(db, spec)
+        }
+    }
+
+    /// Access without its ODBC driver: mdbtools. `mdb-export` writes the table
+    /// as CSV and `mdb-schema` says what each column is, so the text is read as
+    /// text and each column cast to its own type afterwards - a code column
+    /// keeps its leading zeros, and a number column is a number.
+    #[cfg(not(all(windows, feature = "odbc")))]
+    fn run_access_mdbtools(
+        &self,
+        db: &Path,
+        spec: &plan::AccessSourceSpec,
+    ) -> Result<String, EngineError> {
+        let Some(table) = spec.table.as_deref() else {
+            return Err(EngineError::Config(
+                "access: a query needs the Microsoft Access ODBC driver, which exists only on \
+                 Windows. Here a table is read through mdbtools, so name the table instead"
+                    .into(),
+            ));
+        };
+        let schema = mdbtools(&["mdb-schema", "-T", table, &spec.path])?;
+        let types = mdb_schema_types(&schema);
+        // -T is the one that formats a date/time: -D alone left them in the C
+        // locale's "09/24/26 10:11:12", two-digit year and all. -B spells a
+        // yes/no TRUE/FALSE, and -b hex keeps an OLE field's bytes from landing
+        // raw in the CSV. mdbtools reads a zero-length text as NULL, so an empty
+        // string arrives as NULL here (the Windows driver keeps it).
+        let iso = "%Y-%m-%d %H:%M:%S";
+        let csv = mdbtools(&["mdb-export", "-D", iso, "-T", iso, "-B", "-b", "hex", &spec.path, table])?;
+        let tmp = std::env::temp_dir().join(format!(
+            "duckle-access-{}-{}.csv",
+            std::process::id(),
+            spec.node_id.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        ));
+        std::fs::write(&tmp, csv)
+            .map_err(|e| EngineError::Query(format!("access: write {}: {}", tmp.display(), e)))?;
+        let read = format!(
+            "read_csv('{}', header = true, all_varchar = true, quote = '\"', escape = '\"')",
+            tmp.to_string_lossy().replace('\\', "/").replace('\'', "''")
+        );
+        let result = (|| {
+            let header = self.run_rows(Some(db), &format!("DESCRIBE SELECT * FROM {read}"))?;
+            let select = header
+                .iter()
+                .filter_map(|c| c.get("column_name").and_then(|v| v.as_str()))
+                .map(|name| {
+                    let ident = plan::quote_ident(name);
+                    match types.get(name) {
+                        Some(ty) => format!("TRY_CAST(NULLIF({ident}, '') AS {ty}) AS {ident}"),
+                        None => format!("{ident} AS {ident}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.run(
+                Some(db),
+                &format!(
+                    "CREATE OR REPLACE TABLE {} AS SELECT {} FROM {};",
+                    plan::quote_ident(&spec.node_id),
+                    select,
+                    read
+                ),
+                false,
+            )
+        })();
+        let _ = std::fs::remove_file(&tmp);
+        result?;
+        Ok(format!("access: read table {} through mdbtools into {}", table, spec.node_id))
+    }
+
+    /// Microsoft Access, write: create the table from the upstream column types
+    /// when it is not there, then insert every row in one transaction, so a
+    /// failed load leaves the table as it was. The database file itself is
+    /// created when missing. Values are bound as typed parameters - wide text,
+    /// numbers, timestamps, bits - never spliced into SQL, so an accent, a
+    /// quote or the machine's decimal separator cannot change what lands.
+    #[cfg(all(windows, feature = "odbc"))]
+    pub(crate) fn run_access_sink(
+        &self,
+        db: &Path,
+        spec: &plan::AccessSinkSpec,
+    ) -> Result<String, EngineError> {
+        use odbc_api::parameter::InputParameter;
+        use odbc_api::{ConnectionOptions, Environment};
+
+        let cols = describe_columns(self, db, &spec.from_view);
+        if cols.is_empty() {
+            return Err(EngineError::Query("access: the upstream has no columns".into()));
+        }
+        // Every value as DuckDB's own text for it, so a decimal is exact and a
+        // timestamp is one fixed form; each is parsed back to its type below.
+        let select = cols
+            .iter()
+            .map(|(n, t)| {
+                let q = plan::quote_ident(n);
+                if t.to_uppercase().contains("WITH TIME ZONE") {
+                    format!("CAST(CAST({q} AS TIMESTAMP) AS VARCHAR) AS {q}")
+                } else {
+                    format!("CAST({q} AS VARCHAR) AS {q}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rows = self.run_rows(
+            Some(db),
+            &format!("SELECT {} FROM {}", select, plan::quote_ident(&spec.from_view)),
+        )?;
+        let text = |row: &JsonValue, name: &str| -> Option<String> {
+            row.get(name).and_then(|v| v.as_str()).map(str::to_string)
+        };
+
+        if !Path::new(&spec.path).exists() {
+            create_access_file(&spec.path)?;
+        }
+        let env = Environment::new()
+            .map_err(|e| EngineError::Query(format!("access: ODBC environment: {}", e)))?;
+        let conn = env
+            .connect_with_connection_string(
+                &access_conn_string(&spec.path, spec.password.as_deref(), true),
+                ConnectionOptions::default(),
+            )
+            .map_err(|e| EngineError::Query(format!("access: connect failed: {}", e)))?;
+
+        let table = access_ident(&spec.table)?;
+        let mut defs = Vec::with_capacity(cols.len());
+        for (name, ty) in &cols {
+            let widest = rows
+                .iter()
+                .filter_map(|r| text(r, name))
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0);
+            defs.push(format!("{} {}", access_ident(name)?, duckdb_type_to_access(ty, widest)));
+        }
+        // Access has no CREATE TABLE IF NOT EXISTS, and no DDL inside a
+        // transaction, so this runs first and "already exists" is fine.
+        if let Err(e) = conn.execute(&format!("CREATE TABLE {} ({})", table, defs.join(", ")), (), None) {
+            let msg = e.to_string();
+            if !msg.to_lowercase().contains("already exists") {
+                return Err(EngineError::Query(format!("access: create table: {}", msg)));
+            }
+        }
+        // Nothing upstream leaves the table alone, overwrite or not: a source
+        // that produced nothing is not a request to empty the target.
+        if rows.is_empty() {
+            return Ok(format!("access: 0 rows to write into {}", spec.table));
+        }
+        conn.set_autocommit(false)
+            .map_err(|e| EngineError::Query(format!("access: begin: {}", e)))?;
+        let names = cols
+            .iter()
+            .map(|(n, _)| access_ident(n))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        let marks = vec!["?"; cols.len()].join(", ");
+        let written = (|| -> Result<usize, EngineError> {
+            if spec.mode == "overwrite" {
+                conn.execute(&format!("DELETE FROM {}", table), (), None)
+                    .map_err(|e| EngineError::Query(format!("access: clear table: {}", e)))?;
+            }
+            let mut insert = conn
+                .prepare(&format!("INSERT INTO {} ({}) VALUES ({})", table, names, marks))
+                .map_err(|e| EngineError::Query(format!("access: prepare insert: {}", e)))?;
+            let mut count = 0usize;
+            for row in &rows {
+                self.check_cancelled()?;
+                let params = cols
+                    .iter()
+                    .map(|(name, ty)| access_param(text(row, name).as_deref(), ty, name))
+                    .collect::<Result<Vec<Box<dyn InputParameter>>, _>>()?;
+                insert
+                    .execute(params.as_slice())
+                    .map_err(|e| EngineError::Query(format!("access: insert row {}: {}", count + 1, e)))?;
+                count += 1;
+            }
+            Ok(count)
+        })();
+        match written {
+            Ok(count) => {
+                conn.commit()
+                    .map_err(|e| EngineError::Query(format!("access: commit: {}", e)))?;
+                Ok(format!(
+                    "access: {} {} rows into {}",
+                    if spec.mode == "overwrite" { "overwrote with" } else { "inserted" },
+                    count,
+                    spec.table
+                ))
+            }
+            Err(e) => {
+                let _ = conn.rollback();
+                Err(e)
+            }
+        }
+    }
+
+    #[cfg(not(all(windows, feature = "odbc")))]
+    pub(crate) fn run_access_sink(
+        &self,
+        _db: &Path,
+        _spec: &plan::AccessSinkSpec,
+    ) -> Result<String, EngineError> {
+        Err(EngineError::Config(
+            "access: writing an Access database needs Windows and the Microsoft Access ODBC \
+             driver; nothing on this platform can write the file. Reading works here, through \
+             mdbtools"
+                .into(),
         ))
     }
 
@@ -18958,6 +19223,329 @@ fn odbc_type_to_duckdb(dt: &odbc_api::DataType) -> Option<String> {
         D::Time { .. } => Some("TIME".into()),
         D::Timestamp { .. } => Some("TIMESTAMP".into()),
         _ => None,
+    }
+}
+
+/// The character unit ODBC text is fetched in: UTF-16 on Windows, whose narrow
+/// buffers are in the ANSI code page, and UTF-8 bytes elsewhere.
+#[cfg(all(windows, feature = "odbc"))]
+type OdbcChar = u16;
+#[cfg(all(not(windows), feature = "odbc"))]
+type OdbcChar = u8;
+
+#[cfg(all(windows, feature = "odbc"))]
+fn odbc_text(chars: &[u16]) -> String {
+    String::from_utf16_lossy(chars)
+}
+#[cfg(all(not(windows), feature = "odbc"))]
+fn odbc_text(chars: &[u8]) -> String {
+    String::from_utf8_lossy(chars).into_owned()
+}
+
+/// The ODBC driver that ships with the Access Database Engine (Office, or the
+/// free redistributable). It reads and writes both .accdb and .mdb.
+#[cfg(all(windows, feature = "odbc"))]
+const ACCESS_DRIVER: &str = "Microsoft Access Driver (*.mdb, *.accdb)";
+
+/// One ODBC connection-string value, braced when it holds a character that
+/// would otherwise end or open one: a path or a password with a `;` in it.
+#[cfg(all(windows, feature = "odbc"))]
+fn odbc_value(v: &str) -> String {
+    if v.contains([';', '{', '}']) || v.starts_with(' ') || v.ends_with(' ') {
+        format!("{{{}}}", v.replace('}', "}}"))
+    } else {
+        v.to_string()
+    }
+}
+
+/// The connection string for an Access file. It carries the password, so it
+/// is never logged.
+#[cfg(all(windows, feature = "odbc"))]
+///
+/// `ansi92` switches the driver to ANSI-92 SQL, without which it refuses
+/// DECIMAL in a CREATE TABLE ("Syntax error in field definition"). Only the
+/// sink asks for it: ANSI-92 also changes LIKE's wildcards from `*` to `%`,
+/// which would quietly change what a query a user wrote for Access returns.
+fn access_conn_string(path: &str, password: Option<&str>, ansi92: bool) -> String {
+    let mut s = format!("Driver={{{}}};Dbq={};", ACCESS_DRIVER, odbc_value(&path.replace('/', "\\")));
+    if let Some(p) = password {
+        s.push_str(&format!("PWD={};", odbc_value(p)));
+    }
+    if ansi92 {
+        s.push_str("ExtendedAnsiSQL=1;");
+    }
+    s
+}
+
+/// An Access name in brackets. Access has no escape for a bracket inside one,
+/// so a name that holds one is refused rather than mangled.
+#[cfg(all(windows, feature = "odbc"))]
+fn access_ident(name: &str) -> Result<String, EngineError> {
+    if name.trim().is_empty() || name.contains(['[', ']']) {
+        return Err(EngineError::Config(format!(
+            "access: {:?} cannot be an Access name: it is empty or holds a bracket",
+            name
+        )));
+    }
+    Ok(format!("[{}]", name))
+}
+
+/// The Access column type for a DuckDB one, when the sink creates the table.
+/// `widest` is the longest text the column holds in this load: up to 255
+/// characters is a TEXT column, longer is LONGTEXT (a Memo field).
+#[cfg(all(windows, feature = "odbc"))]
+fn duckdb_type_to_access(ty: &str, widest: usize) -> String {
+    let t = ty.trim().to_uppercase();
+    if let Some(inner) = t.strip_prefix("DECIMAL(").and_then(|r| r.strip_suffix(')')) {
+        let mut it = inner.split(',').map(|x| x.trim().parse::<u32>().unwrap_or(0));
+        // Access holds at most 28 digits.
+        let p = it.next().unwrap_or(18).clamp(1, 28);
+        let s = it.next().unwrap_or(0).min(p);
+        return format!("DECIMAL({},{})", p, s);
+    }
+    match t.as_str() {
+        "BOOLEAN" => "YESNO".into(),
+        "TINYINT" | "SMALLINT" | "UTINYINT" => "SMALLINT".into(),
+        // INTEGER in Access DDL is a Long Integer, 32 bits.
+        "USMALLINT" | "INTEGER" => "INTEGER".into(),
+        // Past 32 bits Access has no integer that every file supports, so an
+        // exact decimal rather than a Double that would round the value.
+        "UINTEGER" | "BIGINT" | "UBIGINT" | "HUGEINT" | "UHUGEINT" => "DECIMAL(28,0)".into(),
+        "FLOAT" | "REAL" => "REAL".into(),
+        "DOUBLE" => "DOUBLE".into(),
+        "DATE" | "TIME" => "DATETIME".into(),
+        _ if t.starts_with("TIMESTAMP") => "DATETIME".into(),
+        _ if widest > 255 => "LONGTEXT".into(),
+        _ => "TEXT(255)".into(),
+    }
+}
+
+/// One value, as DuckDB's text for it, bound as the parameter its column type
+/// calls for.
+#[cfg(all(windows, feature = "odbc"))]
+fn access_param(
+    value: Option<&str>,
+    ty: &str,
+    column: &str,
+) -> Result<Box<dyn odbc_api::parameter::InputParameter>, EngineError> {
+    use odbc_api::parameter::{VarWCharBox, WithDataType};
+    use odbc_api::sys::Timestamp;
+    use odbc_api::{Bit, DataType, Nullable};
+    // A timestamp says its SQL type itself; the fixed-size ones infer theirs.
+    let stamp = |value: Nullable<Timestamp>| WithDataType { value, data_type: DataType::Timestamp { precision: 0 } };
+
+    let t = ty.trim().to_uppercase();
+    let unreadable = |v: &str| {
+        EngineError::Query(format!("access: column {}: {:?} is not a {}", column, v, ty))
+    };
+    if t == "BLOB" || t.starts_with("BLOB") {
+        return Err(EngineError::Config(format!(
+            "access: column {} is a BLOB, which this sink does not write; drop or cast it",
+            column
+        )));
+    }
+    if t == "BOOLEAN" {
+        return Ok(match value {
+            None => Box::new(Nullable::<Bit>::null()),
+            Some(v) => Box::new(Nullable::new(Bit::from_bool(v.eq_ignore_ascii_case("true")))),
+        });
+    }
+    if matches!(t.as_str(), "TINYINT" | "SMALLINT" | "UTINYINT" | "USMALLINT" | "INTEGER") {
+        return Ok(match value {
+            None => Box::new(Nullable::<i32>::null()),
+            Some(v) => Box::new(Nullable::new(v.parse::<i32>().map_err(|_| unreadable(v))?)),
+        });
+    }
+    if matches!(t.as_str(), "FLOAT" | "REAL" | "DOUBLE") {
+        return Ok(match value {
+            None => Box::new(Nullable::<f64>::null()),
+            Some(v) => Box::new(Nullable::new(v.parse::<f64>().map_err(|_| unreadable(v))?)),
+        });
+    }
+    if matches!(t.as_str(), "DATE" | "TIME") || t.starts_with("TIMESTAMP") {
+        let Some(v) = value else { return Ok(Box::new(stamp(Nullable::null()))) };
+        // DATE is "2026-01-02", TIMESTAMP "2026-01-02 10:11:12[.ffffff]", TIME
+        // "10:11:12[.ffffff]", which Access keeps on its zero date 1899-12-30.
+        // Access stores whole seconds, so a fraction is not sent.
+        let (date, time) = match (t.as_str(), v.split_once(' ')) {
+            ("TIME", _) => ("1899-12-30", v),
+            (_, Some((d, tm))) => (d, tm),
+            (_, None) => (v, "00:00:00"),
+        };
+        let num = |s: Option<&str>| s.and_then(|x| x.parse::<u16>().ok()).ok_or_else(|| unreadable(v));
+        let mut d = date.split('-');
+        let mut hms = time.split('.').next().unwrap_or("").split(':');
+        return Ok(Box::new(stamp(Nullable::new(Timestamp {
+            year: num(d.next())? as i16,
+            month: num(d.next())?,
+            day: num(d.next())?,
+            hour: num(hms.next())?,
+            minute: num(hms.next())?,
+            second: num(hms.next())?,
+            fraction: 0,
+        }))));
+    }
+    // Text, and the exact numbers (decimals, and integers past 32 bits) as
+    // their digits: the driver converts a numeric literal, whose decimal
+    // separator is always a dot, whatever the machine's locale.
+    Ok(match value {
+        None => Box::new(VarWCharBox::null()),
+        Some(v) => Box::new(VarWCharBox::from_str_slice(v)),
+    })
+}
+
+/// Make an empty Access database at `path`, the way the Access ODBC driver's
+/// own setup does. The format follows the extension: `CREATE_DBV4` makes an
+/// .mdb (Jet 4) and `CREATE_DBV12` an .accdb. Plain `CREATE_DB` is not used:
+/// it always makes an .mdb and appends ".mdb" to whatever name it is given,
+/// so "new.accdb" became "new.accdb.mdb".
+#[cfg(all(windows, feature = "odbc"))]
+fn create_access_file(path: &str) -> Result<(), EngineError> {
+    // The SDK's odbccp32.lib is a static stub that loads odbccp32.dll itself,
+    // so its functions are plain symbols, not `__imp_` imports: linked as a
+    // static library, and left unbundled for the final link to find.
+    #[link(name = "odbccp32", kind = "static", modifiers = "-bundle")]
+    extern "system" {
+        fn SQLConfigDataSourceW(
+            hwnd: *mut std::ffi::c_void,
+            request: u16,
+            driver: *const u16,
+            attributes: *const u16,
+        ) -> i32;
+        fn SQLInstallerErrorW(
+            error: u16,
+            code: *mut u32,
+            message: *mut u16,
+            max: u16,
+            len: *mut u16,
+        ) -> i16;
+    }
+    const ODBC_ADD_DSN: u16 = 1;
+    let native = path.replace('/', "\\");
+    if let Some(parent) = Path::new(&native).parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| EngineError::Query(format!("access: create {}: {}", parent.display(), e)))?;
+    }
+    let driver: Vec<u16> = ACCESS_DRIVER.encode_utf16().chain([0]).collect();
+    // A list of attributes, each NUL-terminated, the list ended by one more.
+    let verb = if native.to_lowercase().ends_with(".mdb") { "CREATE_DBV4" } else { "CREATE_DBV12" };
+    let attributes: Vec<u16> = format!("{}=\"{}\" General", verb, native)
+        .encode_utf16()
+        .chain([0, 0])
+        .collect();
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call,
+    // and a null window handle means no dialog.
+    let ok = unsafe {
+        SQLConfigDataSourceW(std::ptr::null_mut(), ODBC_ADD_DSN, driver.as_ptr(), attributes.as_ptr())
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    let (mut code, mut len) = (0u32, 0u16);
+    let mut message = [0u16; 512];
+    // SAFETY: the buffer and its length agree, and the out-pointers are live.
+    let rc = unsafe { SQLInstallerErrorW(1, &mut code, message.as_mut_ptr(), message.len() as u16, &mut len) };
+    let why = if rc >= 0 {
+        String::from_utf16_lossy(&message[..(len as usize).min(message.len())])
+    } else {
+        "the driver gave no reason".to_string()
+    };
+    Err(EngineError::Query(format!("access: could not create {}: {}", path, why)))
+}
+
+/// Run an mdbtools command and return its stdout. It is how Access is read
+/// where the Access ODBC driver does not exist.
+#[cfg(not(all(windows, feature = "odbc")))]
+fn mdbtools(args: &[&str]) -> Result<String, EngineError> {
+    let mut cmd = std::process::Command::new(args[0]);
+    cmd.args(&args[1..]);
+    let out = cmd.output().map_err(|e| {
+        EngineError::Config(format!(
+            "access: {} did not start ({}). Reading Access outside Windows needs mdbtools: \
+             apt install mdbtools, or brew install mdbtools",
+            args[0], e
+        ))
+    })?;
+    if !out.status.success() {
+        return Err(EngineError::Query(format!(
+            "access: {} failed: {}",
+            args[0],
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Column name -> DuckDB type, from `mdb-schema`'s Access-dialect DDL, whose
+/// column lines read `\t[Name]\t\t\tLong Integer,`. A column whose type is not
+/// one listed here is left as text, which loses nothing.
+#[cfg_attr(all(windows, feature = "odbc"), allow(dead_code))]
+fn mdb_schema_types(ddl: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in ddl.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('[') else { continue };
+        let Some((name, ty)) = rest.split_once(']') else { continue };
+        let ty = ty.trim().trim_end_matches(',').trim().to_lowercase();
+        // A required column reads "Boolean NOT NULL".
+        let ty = ty.trim_end_matches("not null").trim();
+        let duck = if ty.starts_with("text") || ty.starts_with("memo") {
+            continue;
+        } else if ty == "boolean" {
+            "BOOLEAN".to_string()
+        } else if ty == "byte" || ty == "integer" {
+            "SMALLINT".to_string()
+        } else if ty == "long integer" {
+            "INTEGER".to_string()
+        } else if ty == "single" {
+            "REAL".to_string()
+        } else if ty == "double" {
+            "DOUBLE".to_string()
+        } else if ty == "currency" {
+            "DECIMAL(19,4)".to_string()
+        } else if ty == "datetime" {
+            "TIMESTAMP".to_string()
+        } else if let Some(ps) = ty.strip_prefix("numeric").map(|s| s.trim()) {
+            let ps = ps.trim_start_matches('(').trim_end_matches(')');
+            let mut it = ps.split(',').map(|x| x.trim().parse::<u32>().unwrap_or(0));
+            let p = it.next().filter(|p| *p > 0).unwrap_or(18).min(38);
+            format!("DECIMAL({},{})", p, it.next().unwrap_or(0).min(p))
+        } else {
+            continue;
+        };
+        out.insert(name.to_string(), duck);
+    }
+    out
+}
+
+#[cfg(test)]
+mod mdb_schema_tests {
+    use super::mdb_schema_types;
+
+    /// What `mdb-schema -T People file.accdb` printed, verbatim, from mdbtools
+    /// 1.0.0 on Ubuntu 24.04 over a file Access made.
+    const PRINTED: &str = "-- That file uses encoding UTF-8\n\nCREATE TABLE [People]\n (\n\
+        \t[ID]\t\t\tLong Integer, \n\t[Name]\t\t\tText (50), \n\t[Code]\t\t\tText (10), \n\
+        \t[Qty]\t\t\tLong Integer, \n\t[Price]\t\t\tDouble, \n\t[Amount]\t\t\tCurrency, \n\
+        \t[Active]\t\t\tBoolean NOT NULL, \n\t[Joined]\t\t\tDateTime, \n\
+        \t[Notes]\t\t\tMemo/Hyperlink (255), \n\t[Small]\t\t\tByte, \n\t[Ratio]\t\t\tSingle, \n\
+        \t[Big]\t\t\tNumeric (20, 4)\n);\n";
+
+    #[test]
+    fn every_access_type_mdbtools_prints_maps_to_its_duckdb_type() {
+        let t = mdb_schema_types(PRINTED);
+        assert_eq!(t["ID"], "INTEGER");
+        assert_eq!(t["Qty"], "INTEGER");
+        assert_eq!(t["Price"], "DOUBLE");
+        assert_eq!(t["Amount"], "DECIMAL(19,4)");
+        // A required yes/no is printed with its constraint after the type.
+        assert_eq!(t["Active"], "BOOLEAN");
+        assert_eq!(t["Joined"], "TIMESTAMP");
+        assert_eq!(t["Small"], "SMALLINT");
+        assert_eq!(t["Ratio"], "REAL");
+        assert_eq!(t["Big"], "DECIMAL(20,4)");
+        // Text stays text, so a code keeps its leading zeros.
+        assert!(!t.contains_key("Name") && !t.contains_key("Code") && !t.contains_key("Notes"));
     }
 }
 

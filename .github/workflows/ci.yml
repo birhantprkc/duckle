@@ -117,6 +117,9 @@ jobs:
             unixodbc-dev libltdl-dev
           # libltdl-dev provides libltdl.a, needed alongside unixodbc-dev's
           # libodbc.a/libodbcinst.a for the static unixODBC link on Linux (#131).
+          # mdbtools: how src.access reads an Access file off Windows, so
+          # tests/access_mdbtools.rs runs here instead of skipping.
+          sudo apt-get install -y mdbtools
 
       - name: Install DuckDB CLI (for engine tests)
         shell: bash

@@ -2426,6 +2426,32 @@ pub struct Db2SinkSpec {
     pub mode: String,
 }
 
+/// src.access: a Microsoft Access database file (.accdb / .mdb). Windows reads
+/// it through the Access ODBC driver; elsewhere, where no such driver exists,
+/// through mdbtools, which reads a table but cannot run a query.
+#[derive(Debug, Clone)]
+pub struct AccessSourceSpec {
+    pub node_id: String,
+    pub path: String,
+    /// A table, or a query in Access SQL. One of the two is set.
+    pub table: Option<String>,
+    pub query: Option<String>,
+    pub password: Option<String>,
+    pub batch_rows: usize,
+}
+
+/// snk.access: create the table from the upstream column types when it is not
+/// there, then insert. Windows only: nothing else can write an Access file.
+#[derive(Debug, Clone)]
+pub struct AccessSinkSpec {
+    pub from_view: String,
+    pub path: String,
+    pub table: String,
+    pub password: Option<String>,
+    /// "append" (default) or "overwrite", which clears the table first.
+    pub mode: String,
+}
+
 /// src.spool: tail an append-only NDJSON file from where the last successful
 /// run stopped.
 ///

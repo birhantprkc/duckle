@@ -3487,7 +3487,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 
 ### Sources
 
-**122 sources available today.**
+**123 sources available today.**
 
 | Group | Connectors | Status |
 |---|---|---|
@@ -3498,6 +3498,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 | **Geospatial** | Read GeoJSON / Shapefile / GeoPackage / KML / GPX / Esri File Geodatabase; write those plus **GeoParquet**; CRS-aware measurement, reprojection, spatial joins and predicates | Available |
 | **Lakehouse table formats** | Apache Iceberg (a table directory, or a table in an **Iceberg REST catalog** - Polaris, Lakekeeper, Nessie, Gravitino - with OAuth2 client credentials or a bearer token, and S3 credentials for the data files when the catalog does not vend them), Delta Lake, DuckLake (catalog in a local file or a `postgres:` / `mysql:` / `sqlite:` DSN, with the catalog schema and `META_*` parameters - including `META_SECRET` - settable on the node) | Available |
 | **Embedded databases** | SQLite (read tables), DuckDB (read tables or run a query) | Available |
+| **Microsoft Access** | `.accdb` / `.mdb`: a table, or on Windows a query in Access SQL. Windows reads through the Microsoft Access ODBC driver (Office, or the free Access Database Engine) with each column's own type and a database password if set; Linux and macOS read a table through mdbtools, which reads a zero-length text as NULL | Available |
 | **Network relational DBs** | PostgreSQL, MySQL, MariaDB, CockroachDB | Available (live CI for PG + MySQL) |
 | **Change data capture** | PostgreSQL log-based CDC (`src.postgres.cdc`): inserts, updates and deletes from a replication slot through the built-in `pgoutput` plugin, no JVM or Kafka; the position is saved only on a successful run, and the slot's WAL retention is reported on every run | Available |
 | **Network relational DBs** | SQL Server (TDS), Oracle (Instant Client at runtime), ClickHouse (HTTP API), **IBM DB2** (IBM Data Server ODBC driver), **Turso / libSQL** (HTTP pipeline API - no driver install; `libsql://` URLs accepted) | Available |
@@ -3602,7 +3603,7 @@ Validators split their input: passing rows continue on the main port, failures r
 
 ### Sinks
 
-**74 sinks available today.**
+**75 sinks available today.**
 
 | Group | Connectors | Status |
 |---|---|---|
@@ -3610,6 +3611,7 @@ Validators split their input: passing rows continue on the main port, failures r
 | **Geospatial files** | GeoJSON, GeoPackage, Shapefile, KML, GPX via GDAL | Available (lazy-loaded) |
 | **Lakehouse** | Apache Iceberg (full table layout, or into an **Iceberg REST catalog**: the namespace and table are created when missing, **append** matches columns by name and **overwrite** drops and recreates, as two catalog commits because the catalog cannot replace a table in one; DuckDB 1.5.5's iceberg extension leaves an empty `data` folder in the working directory after such a write, which is harmless and upstream), DuckLake - modes: **overwrite**, **append**, **truncate**, **upsert** (set-based delete-by-key + re-insert), **merge** (partial-column `MERGE INTO` that preserves columns the source omits) with optional CDC delete propagation, plus **publish groups** - several DuckLake sinks sharing a group name commit as one snapshot, so readers see all of their tables update together or none of them, and a run that cannot honour the group is refused rather than publishing part of it | Available |
 | **Delta Lake** | Append to a local Delta table (`snk.delta`), creating it from the input's columns and types on the first run (naive timestamps under the `timestampNtz` feature). Columns are matched by name, and a column missing on either side is refused by name rather than dropped or written as NULL. Append only: the DuckDB extension cannot replace a table. Object-storage paths are refused until writing there has been tested | Available (local) |
+| **Microsoft Access** | `.accdb` / `.mdb`, Windows only (Microsoft Access ODBC driver): the file and the table are created when missing; **append** or **overwrite** in one transaction, so a failed load leaves the table as it was; an upstream that produced no rows leaves the table alone; values are bound as typed parameters, so accents, quotes and the machine's decimal separator cannot change what lands | Available |
 | **Embedded databases** | SQLite, DuckDB - modes: **overwrite**, **append**, **upsert** (set-based delete-by-key + re-insert, no PK required), **merge** (partial-column `MERGE INTO` that preserves columns the source omits) with optional CDC delete propagation | Available |
 | **Network relational DBs** | PostgreSQL, MySQL, MariaDB, CockroachDB - modes: **overwrite**, **append**, **truncate**, **upsert** (ON CONFLICT / ON DUPLICATE KEY) with optional CDC delete propagation | Available (live CI for PG + MySQL) |
 | **Network relational DBs** | SQL Server / Azure Synapse (TDS, multi-row VALUES batched; auto-creates the table if absent; **upsert** via MERGE), Oracle (Instant Client; INSERT ALL, batched per statement; auto-creates the table if absent; **upsert** via MERGE), ClickHouse (HTTP JSONEachRow; upsert by pointing at a ReplacingMergeTree target table), **IBM DB2** (ODBC; auto-creates the table, booleans as SMALLINT 1/0 so DB2 for z/OS also accepts them), **Turso / libSQL** (HTTP pipeline API; auto-creates the table, values sent as bound parameters) - every MERGE sink supports **CDC delete propagation** (a delete-flag column removes matched rows) | Available (SQL Server + Oracle + MySQL upsert and delete propagation verified live in Docker) |

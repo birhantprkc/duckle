@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "componentCount": 413,
+  "componentCount": 415,
   "components": [
     {
       "id": "src.csv",
@@ -6227,6 +6227,101 @@
                 "kind": "expression",
                 "rows": 5,
                 "placeholder": "SELECT * FROM users WHERE created_at > ?"
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "src.access",
+      "label": "Microsoft Access",
+      "kind": "source",
+      "availability": "available",
+      "summary": "Read an Access database (.accdb / .mdb): a table, or on Windows a query in Access SQL. Windows reads through the Microsoft Access ODBC driver, Linux and macOS through mdbtools. Text, currency, yes/no and dates keep their types.",
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ]
+      },
+      "manifest": {
+        "id": "src.access",
+        "kind": "source",
+        "label": "Microsoft Access",
+        "description": "Read an Access database (.accdb / .mdb): a table, or on Windows a query in Access SQL. Windows reads through the Microsoft Access ODBC driver, Linux and macOS through mdbtools. Text, currency, yes/no and dates keep their types.",
+        "schemaSource": "autodetect",
+        "sections": [
+          {
+            "label": "Access database",
+            "fields": [
+              {
+                "key": "path",
+                "label": "Database file",
+                "kind": "file-path",
+                "required": true,
+                "filters": [
+                  {
+                    "name": "Access database",
+                    "extensions": [
+                      "accdb",
+                      "mdb"
+                    ]
+                  },
+                  {
+                    "name": "All files",
+                    "extensions": [
+                      "*"
+                    ]
+                  }
+                ],
+                "description": "An .accdb or .mdb file. On Windows it is read through the Microsoft Access ODBC driver (installed with Office, or the free Access Database Engine). On Linux and macOS it is read through mdbtools, one table at a time."
+              },
+              {
+                "key": "password",
+                "label": "Database password",
+                "kind": "text",
+                "placeholder": "••••••••",
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Read",
+            "fields": [
+              {
+                "key": "tableName",
+                "label": "Table",
+                "kind": "text",
+                "placeholder": "Customers"
+              },
+              {
+                "key": "query",
+                "label": "Or a query in Access SQL",
+                "kind": "expression",
+                "rows": 4,
+                "placeholder": "SELECT * FROM [Customers] WHERE [Country] = 'UK'",
+                "description": "Windows only: a query needs the Access ODBC driver. Elsewhere name a table."
+              },
+              {
+                "key": "batchSize",
+                "label": "Fetch batch rows",
+                "kind": "number",
+                "defaultValue": 5000
               }
             ]
           }
@@ -34375,6 +34470,105 @@
                     "value": "json"
                   }
                 ]
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
+            }
+          ],
+          "outputs": []
+        }
+      }
+    },
+    {
+      "id": "snk.access",
+      "label": "Microsoft Access",
+      "kind": "sink",
+      "availability": "available",
+      "summary": "Write a table into an Access database (.accdb / .mdb), creating the file and the table when missing. Append or overwrite in one transaction; an empty upstream leaves the table alone. Windows only, through the Microsoft Access ODBC driver.",
+      "ports": {
+        "inputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ],
+        "outputs": []
+      },
+      "manifest": {
+        "id": "snk.access",
+        "kind": "sink",
+        "label": "Microsoft Access",
+        "description": "Write a table into an Access database (.accdb / .mdb), creating the file and the table when missing. Append or overwrite in one transaction; an empty upstream leaves the table alone. Windows only, through the Microsoft Access ODBC driver.",
+        "schemaSource": "upstream",
+        "sections": [
+          {
+            "label": "Access database",
+            "fields": [
+              {
+                "key": "path",
+                "label": "Database file",
+                "kind": "save-path",
+                "required": true,
+                "filters": [
+                  {
+                    "name": "Access database",
+                    "extensions": [
+                      "accdb",
+                      "mdb"
+                    ]
+                  },
+                  {
+                    "name": "All files",
+                    "extensions": [
+                      "*"
+                    ]
+                  }
+                ],
+                "description": "An .accdb or .mdb file; one that is not there is created. Writing needs Windows and the Microsoft Access ODBC driver (installed with Office, or the free Access Database Engine)."
+              },
+              {
+                "key": "password",
+                "label": "Database password",
+                "kind": "text",
+                "placeholder": "••••••••",
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Write",
+            "fields": [
+              {
+                "key": "tableName",
+                "label": "Table",
+                "kind": "text",
+                "required": true,
+                "placeholder": "Customers"
+              },
+              {
+                "key": "mode",
+                "label": "Write mode",
+                "kind": "select",
+                "defaultValue": "append",
+                "options": [
+                  {
+                    "value": "append",
+                    "label": "Append (create if missing)"
+                  },
+                  {
+                    "value": "overwrite",
+                    "label": "Overwrite (clear first)"
+                  }
+                ],
+                "description": "A run whose upstream produced no rows leaves the table as it was, in either mode."
               }
             ]
           }

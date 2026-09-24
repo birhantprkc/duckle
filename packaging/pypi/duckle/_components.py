@@ -288,6 +288,11 @@ COMPONENTS = {
         'summary': 'Pass first per key; duplicates to reject',
         'params': ['columns', 'tieBreak', 'onFail'],
     },
+    'snk.access': {
+        'kind': 'sink',
+        'summary': 'Write a table into an Access database (.accdb / .mdb), creating the file and the table when missing. Append or overwrite in one transaction; an empty upstream leaves the table alone. Windows only, through the Microsoft Access ODBC driver.',
+        'params': ['path', 'password', 'tableName', 'mode'],
+    },
     'snk.avro': {
         'kind': 'sink',
         'summary': "Write rows as an Apache Avro container file via the pure-Rust `apache-avro` crate. Schema is inferred from the first row's column types (long / double / string / boolean) - or supply a JSON Avro schema via the schemaJson field to override. recordName names the inferred record (default `Row`).",
@@ -663,6 +668,11 @@ COMPONENTS = {
         'kind': 'sink',
         'summary': 'Write the upstream rows as a top-level YAML array (`- key: value` per row).',
         'params': ['path', 'mode', 'compression'],
+    },
+    'src.access': {
+        'kind': 'source',
+        'summary': 'Read an Access database (.accdb / .mdb): a table, or on Windows a query in Access SQL. Windows reads through the Microsoft Access ODBC driver, Linux and macOS through mdbtools. Text, currency, yes/no and dates keep their types.',
+        'params': ['path', 'password', 'tableName', 'query', 'batchSize'],
     },
     'src.adbc': {
         'kind': 'source',

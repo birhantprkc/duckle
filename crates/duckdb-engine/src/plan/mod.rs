@@ -442,6 +442,8 @@ pub enum RuntimeSpec {
     TursoSink(TursoSinkSpec),
     Db2Source(Db2SourceSpec),
     Db2Sink(Db2SinkSpec),
+    AccessSource(AccessSourceSpec),
+    AccessSink(AccessSinkSpec),
     AttachParquetSource(AttachParquetSourceSpec),
     /// materialize = "duckdb"/"duckdbfile": persist the stage into a DuckDB file.
     MaterializeDuckDb(MaterializeDuckDbSpec),
@@ -1995,6 +1997,8 @@ fn build_stage(
     let mut turso_sink: Option<TursoSinkSpec> = None;
     let mut db2_source: Option<Db2SourceSpec> = None;
     let mut db2_sink: Option<Db2SinkSpec> = None;
+    let mut access_source: Option<AccessSourceSpec> = None;
+    let mut access_sink: Option<AccessSinkSpec> = None;
     let mut attach_parquet_source: Option<AttachParquetSourceSpec> = None;
     let mut materialize_duckdb: Option<MaterializeDuckDbSpec> = None;
     let mut redis_sink: Option<RedisSinkSpec> = None;
@@ -3622,6 +3626,22 @@ fn build_stage(
             conn_str: db2_conn_string(&props)?,
             schema: string_prop(&props, "schema").filter(|s| !s.is_empty()),
             table,
+            mode: string_prop(&props, "mode")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "append".to_string()),
+        });
+        (String::new(), StageKind::Sink, Some(from_view.to_string()))
+    } else if component_id == "snk.access" {
+        let from_view = inputs.main().ok_or_else(|| missing_input(node, "main"))?;
+        access_sink = Some(AccessSinkSpec {
+            from_view: from_view.to_string(),
+            path: string_prop(&props, "path")
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| EngineError::Config(format!("{}: path required", component_id)))?,
+            table: string_prop(&props, "tableName")
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| EngineError::Config(format!("{}: tableName required", component_id)))?,
+            password: string_prop(&props, "password").filter(|s| !s.is_empty()),
             mode: string_prop(&props, "mode")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "append".to_string()),
@@ -5713,6 +5733,27 @@ fn build_stage(
             query,
         });
         (String::new(), StageKind::View, None)
+    } else if component_id == "src.access" {
+        let query = string_prop(&props, "query").filter(|s| !s.trim().is_empty());
+        let table = string_prop(&props, "tableName").filter(|s| !s.trim().is_empty());
+        if query.is_none() && table.is_none() {
+            return Err(EngineError::Config(format!("{}: tableName or query required", component_id)));
+        }
+        access_source = Some(AccessSourceSpec {
+            node_id: node.id.clone(),
+            path: string_prop(&props, "path")
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| EngineError::Config(format!("{}: path required", component_id)))?,
+            table,
+            query,
+            password: string_prop(&props, "password").filter(|s| !s.is_empty()),
+            batch_rows: props
+                .get("batchSize")
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n > 0)
+                .unwrap_or(5000) as usize,
+        });
+        (String::new(), StageKind::View, None)
     } else if component_id == "src.db2" {
         let query = string_prop(&props, "query")
             .filter(|s| !s.trim().is_empty())
@@ -7086,6 +7127,8 @@ fn build_stage(
         .or_else(|| turso_sink.map(RuntimeSpec::TursoSink))
         .or_else(|| db2_source.map(RuntimeSpec::Db2Source))
         .or_else(|| db2_sink.map(RuntimeSpec::Db2Sink))
+        .or_else(|| access_source.map(RuntimeSpec::AccessSource))
+        .or_else(|| access_sink.map(RuntimeSpec::AccessSink))
         .or_else(|| attach_parquet_source.map(RuntimeSpec::AttachParquetSource))
         .or_else(|| materialize_duckdb.map(RuntimeSpec::MaterializeDuckDb))
         .or_else(|| redis_sink.map(RuntimeSpec::RedisSink))

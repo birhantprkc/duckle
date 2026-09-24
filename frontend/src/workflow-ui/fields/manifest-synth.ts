@@ -3383,6 +3383,65 @@ function synthNewConnector(comp: ComponentDef): ComponentManifest | null {
             },
         ]);
     }
+    if (comp.id === 'src.access' || comp.id === 'snk.access') {
+        const isSource = comp.id === 'src.access';
+        const filters = [
+            { name: 'Access database', extensions: ['accdb', 'mdb'] },
+            { name: 'All files', extensions: ['*'] },
+        ];
+        return base(
+            comp,
+            [
+                {
+                    label: 'Access database',
+                    fields: [
+                        {
+                            key: 'path',
+                            label: 'Database file',
+                            kind: isSource ? 'file-path' : 'save-path',
+                            required: true,
+                            filters,
+                            description: isSource
+                                ? 'An .accdb or .mdb file. On Windows it is read through the Microsoft Access ODBC driver (installed with Office, or the free Access Database Engine). On Linux and macOS it is read through mdbtools, one table at a time.'
+                                : 'An .accdb or .mdb file; one that is not there is created. Writing needs Windows and the Microsoft Access ODBC driver (installed with Office, or the free Access Database Engine).',
+                        },
+                        { key: 'password', label: 'Database password', kind: 'text', placeholder: '••••••••' },
+                    ],
+                },
+                {
+                    label: isSource ? 'Read' : 'Write',
+                    fields: isSource
+                        ? ([
+                              { key: 'tableName', label: 'Table', kind: 'text', placeholder: 'Customers' },
+                              {
+                                  key: 'query',
+                                  label: 'Or a query in Access SQL',
+                                  kind: 'expression',
+                                  rows: 4,
+                                  placeholder: 'SELECT * FROM [Customers] WHERE [Country] = \'UK\'',
+                                  description: 'Windows only: a query needs the Access ODBC driver. Elsewhere name a table.',
+                              },
+                              { key: 'batchSize', label: 'Fetch batch rows', kind: 'number', defaultValue: 5000 },
+                          ] as Field[])
+                        : ([
+                              { key: 'tableName', label: 'Table', kind: 'text', required: true, placeholder: 'Customers' },
+                              {
+                                  key: 'mode',
+                                  label: 'Write mode',
+                                  kind: 'select',
+                                  defaultValue: 'append',
+                                  options: [
+                                      { value: 'append', label: 'Append (create if missing)' },
+                                      { value: 'overwrite', label: 'Overwrite (clear first)' },
+                                  ],
+                                  description: 'A run whose upstream produced no rows leaves the table as it was, in either mode.',
+                              },
+                          ] as Field[]),
+                },
+            ],
+            isSource ? 'autodetect' : 'upstream',
+        );
+    }
     if (comp.id === 'src.db2' || comp.id === 'snk.db2') {
         const isSource = comp.id === 'src.db2';
         return base(comp, [
