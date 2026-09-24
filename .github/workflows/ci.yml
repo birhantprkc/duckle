@@ -389,24 +389,21 @@ jobs:
       - name: Start MinIO and the Iceberg REST catalog
         run: |
           set -e
-          # minio/minio and minio/mc are no longer pullable from Docker Hub; the
-          # same pinned quay.io images and retry the minio job above uses.
+          # The official MinIO images are gone from Docker Hub and quay.io; this is
+          # the MinIO server as Chainguard builds it, pinned by digest, and the
+          # same one the minio job below uses.
+          MINIO=cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
           for i in 1 2 3; do
-            docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 && break
+            docker pull "$MINIO" && break
             echo "docker pull attempt $i failed; retrying in 5s"; sleep 5
-          done
-          for i in 1 2 3; do
-            docker pull quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z && break
-            echo "mc pull attempt $i failed; retrying in 5s"; sleep 5
           done
           docker network create ice
           docker run -d --name minio --network ice -p 9000:9000 \
             -e MINIO_ROOT_USER=admin -e MINIO_ROOT_PASSWORD=password \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 server /data
+            "$MINIO" server /data
           for i in $(seq 1 30); do curl -sf http://localhost:9000/minio/health/live && break; sleep 2; done
-          docker run --rm --network host \
-            -e MC_HOST_local=http://admin:password@localhost:9000 \
-            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z mb --ignore-existing local/warehouse
+          # The bucket, with a signed PUT rather than an mc container.
+          curl -fsS -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user admin:password http://localhost:9000/warehouse
           docker run -d --name rest --network ice -p 8181:8181 \
             -e AWS_ACCESS_KEY_ID=admin -e AWS_SECRET_ACCESS_KEY=password -e AWS_REGION=us-east-1 \
             -e CATALOG_WAREHOUSE=s3://warehouse/ \
@@ -510,33 +507,25 @@ jobs:
       - name: Start MinIO + create bucket
         run: |
           set -e
-          # Docker Hub pulls flake intermittently (registry timeouts); retry the
-          # pull before running so a transient hiccup does not fail the job.
+          # The official MinIO images are gone from Docker Hub and quay.io; this is
+          # the MinIO server as Chainguard builds it, pinned by digest. Pulls are
+          # retried so a registry hiccup does not fail the job.
+          MINIO=cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
           for i in 1 2 3; do
-            docker pull quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 && break
+            docker pull "$MINIO" && break
             echo "docker pull attempt $i failed; retrying in 5s"; sleep 5
           done
-          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+          docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772 server /data --console-address ":9001"
+            "$MINIO" server /data
           for i in $(seq 1 30); do
             if curl -fs http://localhost:9000/minio/health/live >/dev/null 2>&1; then
               echo "MinIO is up"; break
             fi
             sleep 2
           done
-          # mc isn't in the minio server image. Run the official mc container
-          # instead of downloading the standalone binary: the dl.min.io TLS chain
-          # started failing curl verification (exit 60), and the Docker pull is
-          # already retried. Host networking reaches the mapped localhost:9000,
-          # and MC_HOST_ configures the alias inline without a persisted config.
-          for i in 1 2 3; do
-            docker pull quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z && break
-            echo "mc pull attempt $i failed; retrying in 5s"; sleep 5
-          done
-          docker run --rm --network host \
-            -e MC_HOST_local=http://minioadmin:minioadmin@localhost:9000 \
-            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z mb --ignore-existing local/duckle-test
+          # The bucket, with a signed PUT: the mc image went with the others.
+          curl -fsS -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin http://localhost:9000/duckle-test
       - name: Install DuckDB CLI
         run: |
           set -e

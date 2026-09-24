@@ -231,11 +231,11 @@ integration:minio:
   <<: *rust_defaults
   stage: integration
   services:
-    # minio/minio is no longer pullable from Docker Hub; the same pinned quay.io
-    # image the GitHub minio and iceberg jobs use.
-    - name: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772
+    # The official MinIO images are gone from Docker Hub and quay.io; the same
+    # Chainguard build, pinned by digest, the GitHub minio and iceberg jobs use.
+    - name: cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
       alias: minio
-      command: ["server", "/data", "--console-address", ":9001"]
+      command: ["server", "/data"]
       variables:
         MINIO_ROOT_USER: minioadmin
         MINIO_ROOT_PASSWORD: minioadmin
