@@ -54,6 +54,10 @@ cron = { workspace = true }
 # dep tree (300+ services we don't need).
 hmac = "0.13"
 base64 = "0.23"
+# NTLM for SharePoint Server on premises (Windows authentication). NTLMv2 on
+# RustCrypto primitives already in the tree; chosen over sspi, which brings
+# Kerberos and pre-release crypto crates this does not need.
+ntlmclient = "0.2"
 # MongoDB. The official driver is async-only; we use a minimal tokio
 # rt feature and call .block_on() from the synchronous executor.
 # Significant dep cost (~5MB, 30s of compile time) but the only path

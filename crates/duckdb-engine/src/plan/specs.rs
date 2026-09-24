@@ -2452,6 +2452,42 @@ pub struct AccessSinkSpec {
     pub mode: String,
 }
 
+/// src.sharepoint: SharePoint Server (on premises) over REST, signed in with
+/// NTLM. A list reads as rows; a document library file reads by its format.
+#[derive(Debug, Clone)]
+pub struct SharePointSourceSpec {
+    pub node_id: String,
+    pub site_url: String,
+    pub username: String,
+    pub password: String,
+    pub read: SharePointRead,
+    /// Items asked for per page (`$top`).
+    pub page_size: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum SharePointRead {
+    List { list: String, select: Option<String>, filter: Option<String> },
+    /// `url` is server-relative: /sites/team/Shared Documents/orders.csv.
+    File { url: String, format: Option<String> },
+}
+
+/// snk.sharepoint: rows become list items, or the output uploads as a file.
+#[derive(Debug, Clone)]
+pub struct SharePointSinkSpec {
+    pub from_view: String,
+    pub site_url: String,
+    pub username: String,
+    pub password: String,
+    pub write: SharePointWrite,
+}
+
+#[derive(Debug, Clone)]
+pub enum SharePointWrite {
+    List { list: String },
+    File { folder: String, name: String, format: Option<String>, overwrite: bool },
+}
+
 /// src.spool: tail an append-only NDJSON file from where the last successful
 /// run stopped.
 ///

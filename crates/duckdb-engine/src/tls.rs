@@ -238,7 +238,40 @@ pub fn http_agent_with(transport: &HttpTransport) -> ureq::Agent {
     // Resolve everything BEFORE the cache lookup, so the key is what the agent
     // was actually built with. A proxy set after startup then rebuilds rather
     // than being frozen at first use (#80).
-    let want = HttpTransport {
+    let want = resolved(transport);
+    {
+        let cache = AGENT_CACHE.lock().unwrap();
+        if let Some(entries) = cache.as_ref() {
+            if let Some((_, agent)) = entries.iter().find(|(have, _)| *have == want) {
+                return agent.clone();
+            }
+        }
+    }
+    let agent = build_agent(&want);
+    let mut cache = AGENT_CACHE.lock().unwrap();
+    let entries = cache.get_or_insert_with(Vec::new);
+    // A pipeline has a handful of distinct transports, not hundreds. Cap it so a
+    // pathological one cannot grow this without bound; dropping the oldest only
+    // costs a rebuild.
+    if entries.len() >= 16 {
+        entries.remove(0);
+    }
+    entries.push((want, agent.clone()));
+    agent
+}
+
+/// An agent with a connection pool of its own, for an authentication that
+/// belongs to a connection rather than to a request. NTLM signs in the TCP
+/// connection itself, so the connection that completed the handshake has to
+/// be the one the next request goes out on - which a pool shared with every
+/// other HTTP component cannot promise. Same trust, proxy, timeouts and
+/// network policy as every other agent.
+pub fn http_agent_unshared(transport: &HttpTransport) -> ureq::Agent {
+    build_agent(&resolved(transport))
+}
+
+fn resolved(transport: &HttpTransport) -> HttpTransport {
+    HttpTransport {
         proxy: transport.proxy.clone().or_else(current_proxy),
         read_timeout_secs: Some(
             transport
@@ -253,15 +286,10 @@ pub fn http_agent_with(transport: &HttpTransport) -> ureq::Agent {
                 .unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS),
         ),
         user_agent: transport.user_agent.clone(),
-    };
-    {
-        let cache = AGENT_CACHE.lock().unwrap();
-        if let Some(entries) = cache.as_ref() {
-            if let Some((_, agent)) = entries.iter().find(|(have, _)| *have == want) {
-                return agent.clone();
-            }
-        }
     }
+}
+
+fn build_agent(want: &HttpTransport) -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new().tls_config(Arc::new(build_client_config()));
     if crate::policy::network_is_restricted() {
         builder = with_network_policy(builder, want.proxy.is_some());
@@ -281,17 +309,7 @@ pub fn http_agent_with(transport: &HttpTransport) -> ureq::Agent {
     if let Some(ua) = &want.user_agent {
         builder = builder.user_agent(ua);
     }
-    let agent = builder.build();
-    let mut cache = AGENT_CACHE.lock().unwrap();
-    let entries = cache.get_or_insert_with(Vec::new);
-    // A pipeline has a handful of distinct transports, not hundreds. Cap it so a
-    // pathological one cannot grow this without bound; dropping the oldest only
-    // costs a rebuild.
-    if entries.len() >= 16 {
-        entries.remove(0);
-    }
-    entries.push((want, agent.clone()));
-    agent
+    builder.build()
 }
 
 #[cfg(test)]

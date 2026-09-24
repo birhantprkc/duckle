@@ -91,6 +91,7 @@ pub mod watermark;
 pub mod xsd;
 pub mod xsd_contract;
 mod connectors;
+mod sharepoint;
 pub use connectors::remote_fingerprint;
 mod run_log;
 mod util;
@@ -2564,6 +2565,8 @@ impl DuckdbEngine {
                     Some(RuntimeSpec::Db2Sink(spec)) => self.run_db2_sink(&db_path, spec),
                     Some(RuntimeSpec::AccessSource(spec)) => self.run_access_source(&db_path, spec),
                     Some(RuntimeSpec::AccessSink(spec)) => self.run_access_sink(&db_path, spec),
+                    Some(RuntimeSpec::SharePointSource(spec)) => self.run_sharepoint_source(&db_path, spec),
+                    Some(RuntimeSpec::SharePointSink(spec)) => self.run_sharepoint_sink(&db_path, spec),
                     Some(RuntimeSpec::ClickhouseSink(spec)) => {
                         self.run_clickhouse_sink(&db_path, spec)
                     }

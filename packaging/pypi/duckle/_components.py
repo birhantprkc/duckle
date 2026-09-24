@@ -594,6 +594,11 @@ COMPONENTS = {
         'summary': 'Same wire as snk.cassandra - INSERT via the scylla CQL driver.',
         'params': ['contactPoints', 'user', 'password', 'keyspace', 'tableName', 'batchSize'],
     },
+    'snk.sharepoint': {
+        'kind': 'sink',
+        'summary': 'SharePoint Server on premises over REST, signed in with Windows authentication (NTLM). Rows become list items, or the output uploads as a document library file (CSV, TSV, Parquet, JSON, Excel). An upstream with no rows changes nothing.',
+        'params': ['siteUrl', 'username', 'password', 'mode', 'listName', 'folderUrl', 'fileName', 'format', 'overwrite'],
+    },
     'snk.snowflake': {
         'kind': 'sink',
         'summary': 'INSERT to a Snowflake table via the SQL API (/api/v2/statements) with PAT (Personal Access Token) bearer auth. Multi-row INSERTs batched at 1000 rows by default.',
@@ -1170,6 +1175,11 @@ COMPONENTS = {
         'kind': 'source',
         'summary': 'SendGrid REST. Bearer API key. Offset pagination via `offset` + `limit`. responsePath /result for /v3/marketing/* endpoints.',
         'params': ['url', 'method', 'body', 'headers', 'connectionRef', 'transportRef', 'authType', 'authToken', 'authHeader', 'tokenUrl', 'clientId', 'clientSecret', 'clientAuth', 'scope', 'responseFormat', 'responsePath', 'jsonPath', 'paginationType', 'nextUrlPath', 'cursorNextPath', 'cursorParam', 'offsetParam', 'pageSize', 'totalCountPath', 'pageParam', 'startPage', 'maxPages', 'incrementalField', 'incrementalInitial', 'responseMetadata', 'rawResponseDestination', 'httpProxy', 'httpUserAgent', 'httpConnectTimeoutSecs', 'httpReadTimeoutSecs'],
+    },
+    'src.sharepoint': {
+        'kind': 'source',
+        'summary': 'SharePoint Server on premises (2016 / 2019 / Subscription Edition) over REST, signed in with Windows authentication (NTLM). A list reads as rows, every page followed; a document library file reads by its format (CSV, TSV, Parquet, JSON, Excel).',
+        'params': ['siteUrl', 'username', 'password', 'mode', 'listName', 'select', 'filter', 'pageSize', 'fileUrl', 'format'],
     },
     'src.shopify': {
         'kind': 'source',

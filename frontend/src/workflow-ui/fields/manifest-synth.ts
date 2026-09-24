@@ -3383,6 +3383,121 @@ function synthNewConnector(comp: ComponentDef): ComponentManifest | null {
             },
         ]);
     }
+    if (comp.id === 'src.sharepoint' || comp.id === 'snk.sharepoint') {
+        const isSource = comp.id === 'src.sharepoint';
+        const list = { key: 'mode', equals: 'list' };
+        const file = { key: 'mode', equals: 'file' };
+        const format: Field = {
+            key: 'format',
+            label: 'Format',
+            kind: 'select',
+            defaultValue: '',
+            options: [
+                { label: 'From the file name', value: '' },
+                { label: 'CSV', value: 'csv' },
+                { label: 'TSV', value: 'tsv' },
+                { label: 'Parquet', value: 'parquet' },
+                { label: 'JSON', value: 'json' },
+                { label: 'Excel (.xlsx)', value: 'xlsx' },
+            ],
+            visibleWhen: file,
+        };
+        return base(
+            comp,
+            [
+                {
+                    label: 'SharePoint site',
+                    fields: [
+                        {
+                            key: 'siteUrl',
+                            label: 'Site URL',
+                            kind: 'text',
+                            required: true,
+                            placeholder: 'https://sharepoint.contoso.local/sites/team',
+                            description: 'SharePoint Server on premises (2016, 2019, Subscription Edition), over its REST API.',
+                        },
+                        {
+                            key: 'username',
+                            label: 'User',
+                            kind: 'text',
+                            required: true,
+                            placeholder: 'CONTOSO\\alice',
+                            description: 'Windows authentication (NTLM): DOMAIN\\user or user@domain.',
+                        },
+                        { key: 'password', label: 'Password', kind: 'text', placeholder: '••••••••' },
+                    ],
+                },
+                {
+                    label: isSource ? 'Read' : 'Write',
+                    fields: [
+                        {
+                            key: 'mode',
+                            label: isSource ? 'Read from' : 'Write to',
+                            kind: 'select',
+                            defaultValue: 'list',
+                            options: [
+                                { label: isSource ? 'A list (its items as rows)' : 'A list (each row a new item)', value: 'list' },
+                                { label: isSource ? 'A file in a document library' : 'A file in a document library', value: 'file' },
+                            ],
+                        },
+                        // Not `required`: the editor's check does not see visibleWhen, so the field
+                        // the other mode hides would be demanded. The engine names a missing one.
+                        { key: 'listName', label: 'List', kind: 'text', placeholder: 'Orders', visibleWhen: list },
+                        ...(isSource
+                            ? ([
+                                  {
+                                      key: 'select',
+                                      label: 'Columns ($select)',
+                                      kind: 'text',
+                                      placeholder: 'ID,Title,Amount',
+                                      description: 'Internal column names, comma separated. Empty reads every column.',
+                                      visibleWhen: list,
+                                  },
+                                  {
+                                      key: 'filter',
+                                      label: 'Filter ($filter)',
+                                      kind: 'text',
+                                      placeholder: "Region eq 'North'",
+                                      description: 'An OData filter, applied by SharePoint before anything is sent.',
+                                      visibleWhen: list,
+                                  },
+                                  { key: 'pageSize', label: 'Items per page', kind: 'number', defaultValue: 1000, visibleWhen: list },
+                                  {
+                                      key: 'fileUrl',
+                                      label: 'File',
+                                      kind: 'text',
+                                      placeholder: '/sites/team/Shared Documents/orders.csv',
+                                      description: 'Server-relative path of the file.',
+                                      visibleWhen: file,
+                                  },
+                                  format,
+                              ] as Field[])
+                            : ([
+                                  {
+                                      key: 'folderUrl',
+                                      label: 'Folder',
+                                      kind: 'text',
+                                      placeholder: '/sites/team/Shared Documents',
+                                      description: 'Server-relative path of the library folder.',
+                                      visibleWhen: file,
+                                  },
+                                  { key: 'fileName', label: 'File name', kind: 'text', placeholder: 'orders.csv', visibleWhen: file },
+                                  format,
+                                  {
+                                      key: 'overwrite',
+                                      label: 'Replace a file that is already there',
+                                      kind: 'bool',
+                                      defaultValue: true,
+                                      description: 'Off, the run fails rather than replace it. A run whose upstream produced no rows leaves the file as it was.',
+                                      visibleWhen: file,
+                                  },
+                              ] as Field[])),
+                    ],
+                },
+            ],
+            isSource ? 'autodetect' : 'upstream',
+        );
+    }
     if (comp.id === 'src.access' || comp.id === 'snk.access') {
         const isSource = comp.id === 'src.access';
         const filters = [

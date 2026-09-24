@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "componentCount": 415,
+  "componentCount": 417,
   "components": [
     {
       "id": "src.csv",
@@ -36785,6 +36785,169 @@
       }
     },
     {
+      "id": "snk.sharepoint",
+      "label": "SharePoint Server",
+      "kind": "sink",
+      "availability": "available",
+      "summary": "SharePoint Server on premises over REST, signed in with Windows authentication (NTLM). Rows become list items, or the output uploads as a document library file (CSV, TSV, Parquet, JSON, Excel). An upstream with no rows changes nothing.",
+      "ports": {
+        "inputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ],
+        "outputs": []
+      },
+      "manifest": {
+        "id": "snk.sharepoint",
+        "kind": "sink",
+        "label": "SharePoint Server",
+        "description": "SharePoint Server on premises over REST, signed in with Windows authentication (NTLM). Rows become list items, or the output uploads as a document library file (CSV, TSV, Parquet, JSON, Excel). An upstream with no rows changes nothing.",
+        "schemaSource": "upstream",
+        "sections": [
+          {
+            "label": "SharePoint site",
+            "fields": [
+              {
+                "key": "siteUrl",
+                "label": "Site URL",
+                "kind": "text",
+                "required": true,
+                "placeholder": "https://sharepoint.contoso.local/sites/team",
+                "description": "SharePoint Server on premises (2016, 2019, Subscription Edition), over its REST API."
+              },
+              {
+                "key": "username",
+                "label": "User",
+                "kind": "text",
+                "required": true,
+                "placeholder": "CONTOSO\\alice",
+                "description": "Windows authentication (NTLM): DOMAIN\\user or user@domain."
+              },
+              {
+                "key": "password",
+                "label": "Password",
+                "kind": "text",
+                "placeholder": "••••••••",
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Write",
+            "fields": [
+              {
+                "key": "mode",
+                "label": "Write to",
+                "kind": "select",
+                "defaultValue": "list",
+                "options": [
+                  {
+                    "label": "A list (each row a new item)",
+                    "value": "list"
+                  },
+                  {
+                    "label": "A file in a document library",
+                    "value": "file"
+                  }
+                ]
+              },
+              {
+                "key": "listName",
+                "label": "List",
+                "kind": "text",
+                "placeholder": "Orders",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "list"
+                }
+              },
+              {
+                "key": "folderUrl",
+                "label": "Folder",
+                "kind": "text",
+                "placeholder": "/sites/team/Shared Documents",
+                "description": "Server-relative path of the library folder.",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              },
+              {
+                "key": "fileName",
+                "label": "File name",
+                "kind": "text",
+                "placeholder": "orders.csv",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              },
+              {
+                "key": "format",
+                "label": "Format",
+                "kind": "select",
+                "defaultValue": "",
+                "options": [
+                  {
+                    "label": "From the file name",
+                    "value": ""
+                  },
+                  {
+                    "label": "CSV",
+                    "value": "csv"
+                  },
+                  {
+                    "label": "TSV",
+                    "value": "tsv"
+                  },
+                  {
+                    "label": "Parquet",
+                    "value": "parquet"
+                  },
+                  {
+                    "label": "JSON",
+                    "value": "json"
+                  },
+                  {
+                    "label": "Excel (.xlsx)",
+                    "value": "xlsx"
+                  }
+                ],
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              },
+              {
+                "key": "overwrite",
+                "label": "Replace a file that is already there",
+                "kind": "bool",
+                "defaultValue": true,
+                "description": "Off, the run fails rather than replace it. A run whose upstream produced no rows leaves the file as it was.",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
+            }
+          ],
+          "outputs": []
+        }
+      }
+    },
+    {
       "id": "snk.salesforce.bulk",
       "label": "Salesforce Bulk",
       "kind": "sink",
@@ -52994,6 +53157,180 @@
               "label": "reject",
               "type": "reject",
               "optional": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "src.sharepoint",
+      "label": "SharePoint Server",
+      "kind": "source",
+      "availability": "available",
+      "summary": "SharePoint Server on premises (2016 / 2019 / Subscription Edition) over REST, signed in with Windows authentication (NTLM). A list reads as rows, every page followed; a document library file reads by its format (CSV, TSV, Parquet, JSON, Excel).",
+      "ports": {
+        "inputs": [],
+        "outputs": [
+          {
+            "id": "main",
+            "label": "main",
+            "type": "main"
+          }
+        ]
+      },
+      "manifest": {
+        "id": "src.sharepoint",
+        "kind": "source",
+        "label": "SharePoint Server",
+        "description": "SharePoint Server on premises (2016 / 2019 / Subscription Edition) over REST, signed in with Windows authentication (NTLM). A list reads as rows, every page followed; a document library file reads by its format (CSV, TSV, Parquet, JSON, Excel).",
+        "schemaSource": "autodetect",
+        "sections": [
+          {
+            "label": "SharePoint site",
+            "fields": [
+              {
+                "key": "siteUrl",
+                "label": "Site URL",
+                "kind": "text",
+                "required": true,
+                "placeholder": "https://sharepoint.contoso.local/sites/team",
+                "description": "SharePoint Server on premises (2016, 2019, Subscription Edition), over its REST API."
+              },
+              {
+                "key": "username",
+                "label": "User",
+                "kind": "text",
+                "required": true,
+                "placeholder": "CONTOSO\\alice",
+                "description": "Windows authentication (NTLM): DOMAIN\\user or user@domain."
+              },
+              {
+                "key": "password",
+                "label": "Password",
+                "kind": "text",
+                "placeholder": "••••••••",
+                "secret": true
+              }
+            ]
+          },
+          {
+            "label": "Read",
+            "fields": [
+              {
+                "key": "mode",
+                "label": "Read from",
+                "kind": "select",
+                "defaultValue": "list",
+                "options": [
+                  {
+                    "label": "A list (its items as rows)",
+                    "value": "list"
+                  },
+                  {
+                    "label": "A file in a document library",
+                    "value": "file"
+                  }
+                ]
+              },
+              {
+                "key": "listName",
+                "label": "List",
+                "kind": "text",
+                "placeholder": "Orders",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "list"
+                }
+              },
+              {
+                "key": "select",
+                "label": "Columns ($select)",
+                "kind": "text",
+                "placeholder": "ID,Title,Amount",
+                "description": "Internal column names, comma separated. Empty reads every column.",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "list"
+                }
+              },
+              {
+                "key": "filter",
+                "label": "Filter ($filter)",
+                "kind": "text",
+                "placeholder": "Region eq 'North'",
+                "description": "An OData filter, applied by SharePoint before anything is sent.",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "list"
+                }
+              },
+              {
+                "key": "pageSize",
+                "label": "Items per page",
+                "kind": "number",
+                "defaultValue": 1000,
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "list"
+                }
+              },
+              {
+                "key": "fileUrl",
+                "label": "File",
+                "kind": "text",
+                "placeholder": "/sites/team/Shared Documents/orders.csv",
+                "description": "Server-relative path of the file.",
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              },
+              {
+                "key": "format",
+                "label": "Format",
+                "kind": "select",
+                "defaultValue": "",
+                "options": [
+                  {
+                    "label": "From the file name",
+                    "value": ""
+                  },
+                  {
+                    "label": "CSV",
+                    "value": "csv"
+                  },
+                  {
+                    "label": "TSV",
+                    "value": "tsv"
+                  },
+                  {
+                    "label": "Parquet",
+                    "value": "parquet"
+                  },
+                  {
+                    "label": "JSON",
+                    "value": "json"
+                  },
+                  {
+                    "label": "Excel (.xlsx)",
+                    "value": "xlsx"
+                  }
+                ],
+                "visibleWhen": {
+                  "key": "mode",
+                  "equals": "file"
+                }
+              }
+            ]
+          }
+        ],
+        "ports": {
+          "inputs": [],
+          "outputs": [
+            {
+              "id": "main",
+              "label": "main",
+              "type": "main"
             }
           ]
         }

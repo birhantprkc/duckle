@@ -3487,7 +3487,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 
 ### Sources
 
-**123 sources available today.**
+**124 sources available today.**
 
 | Group | Connectors | Status |
 |---|---|---|
@@ -3508,6 +3508,7 @@ Duckle is not a CSV tool with extras. It reads a broad set of formats and source
 | **Streaming** | Apache Kafka / Redpanda (pure-Rust `rskafka`), NATS JetStream, GCP Pub/Sub (REST + auto-ack), RabbitMQ (`lapin` AMQP), AWS Kinesis (HTTP + SigV4 - no AWS SDK), WebSocket (`ws://` / `wss://`, optional subscribe frame) | Available |
 | **Streaming** | Pulsar, Event Hubs, multi-shard Kinesis | Planned |
 | **APIs and SaaS (REST)** | Salesforce, HubSpot, Pipedrive, Zendesk, Intercom, Stripe, QuickBooks, Xero, Shopify, Notion, Airtable, Asana, Trello, ClickUp, Monday.com, GitHub, GitLab, Linear, Jira, Slack, Discord, Telegram, Twilio, Mailchimp, SendGrid, Segment - thin pre-configured wrappers over `src.rest` / `src.graphql`. `src.rest` takes a configurable API-key auth header name and offset pagination that stops on a body `total_count`. **Salesforce Bulk** (`src.salesforce.bulk`) - Bulk API 2.0 query source for migration-scale reads: SOQL as an async query job (query / queryAll), paged CSV result sets streamed to disk via `Sforce-Locator`, typed empty relations on 0 records | Available |
+| **SharePoint Server** | On premises (2016 / 2019 / Subscription Edition), signed in with Windows authentication (NTLM, as `DOMAIN\user` or `user@domain`): a list's items as rows, every page followed, with optional `$select` / `$filter` done by SharePoint; or a file in a document library read by its format (CSV, TSV, Parquet, JSON, Excel). Not supported: Kerberos-only farms and IIS Extended Protection (channel binding) set to Required | Available |
 | **APIs (protocols)** | OData v4 (follows `@odata.nextLink`), SOAP / generic XML APIs (XML response parsing with namespace local-name match) | Available |
 | **Health data (DHIS2)** | `src.dhis2` reads the DHIS2 Web API: aggregate `dataValueSets`, paged metadata lists, tracker exports, and `analytics/dataValueSet.json`. `snk.dhis2` imports back: chunked requests, `importStrategy` (CREATE_AND_UPDATE is DHIS2's upsert), `dryRun`, and real import-summary parsing, so conflicts and a non-zero `ignored` count fail the run instead of passing as a green HTTP 200. Auth via personal access token or HTTP Basic. Raw `/api/analytics` (columnar `headers[]` + `rows[][]`) is not supported | Available |
 | **NoSQL and search** | **Neo4j** (Cypher over the HTTP Query API - self-hosted or Aura, no Bolt driver; optional `$parameters`), MongoDB (official driver), Cassandra / ScyllaDB (CQL), Elasticsearch / OpenSearch (from+size + search_after), **Manticore Search** (HTTP JSON `/search`; `table` + limit/offset, and a window past the default 1000 best-ranked matches raises `max_matches` to suit), Redis (SCAN + GET), CouchDB (`_all_docs`), DynamoDB (HTTP + SigV4 - no AWS SDK; auto-unwraps typed attributes) | Available |
@@ -3603,7 +3604,7 @@ Validators split their input: passing rows continue on the main port, failures r
 
 ### Sinks
 
-**75 sinks available today.**
+**76 sinks available today.**
 
 | Group | Connectors | Status |
 |---|---|---|
@@ -3620,6 +3621,7 @@ Validators split their input: passing rows continue on the main port, failures r
 | **Hugging Face** | Push to a Hugging Face Hub dataset repo (`snk.huggingface`): the upstream is materialized to Parquet and committed over the Hub API (create-repo → preupload → git-LFS → commit); write token required, repo auto-created (public or private) | Available |
 | **Cloud warehouses** | MotherDuck, Snowflake (PAT or JWT RS256; **upsert** + delete propagation via MERGE), BigQuery, Redshift, Databricks SQL (**upsert** + delete propagation via MERGE), Azure Synapse, **Teradata** (ODBC), **DuckDB Quack** (concurrent writers to remote DuckDB via the May 2026 protocol) | Available (Snowflake MERGE verified live against the SQL-API emulator) |
 | **HTTP APIs** | REST (POST/PUT/PATCH batched JSON-array; configurable API-key auth header name), Webhook (one POST per row), GraphQL mutations | Available |
+| **SharePoint Server** | On premises, NTLM sign-in: each row added as a list item (numbers as numbers, date/times as ISO 8601), or the output uploaded as a document library file (CSV, TSV, Parquet, JSON, Excel), replacing an existing one or refusing to. An upstream with no rows changes nothing | Available |
 | **SaaS / CRM** | Salesforce (`snk.salesforce`) - sObject Collections API: **insert / update / upsert (by external Id) / delete**, ≤200 records/request, Bearer token or OAuth 2.0 client-credentials (fresh token minted per run, same auth as `src.salesforce`). **Salesforce Bulk** (`snk.salesforce.bulk`) - Bulk API 2.0 for migration-scale loads: **insert / update / upsert / delete / hardDelete**, DuckDB streams to CSV and each ≤90 MB part runs as an async job | Available |
 | **Email (SMTP)** | Per-row SMTP send via pure-Rust `lettre` + rustls. Plain text v1; HTML + attachments follow. | Available |
 | **NoSQL** | **Neo4j** (rows as nodes over the HTTP Query API; one `UNWIND $rows` round trip per batch, `mergeKeys` switches CREATE to MERGE so re-runs update rather than duplicate), MongoDB (insert_many batched; **upsert** via replace_one on a key, plus delete propagation via delete_one), Cassandra / ScyllaDB (CQL), Elasticsearch / OpenSearch (`_bulk` NDJSON), **Manticore Search** (HTTP JSON `/bulk`; the doc rides inside the action line, insert or replace, and a batch the server rejects at HTTP 200 fails the run), Redis (pipelined SET) | Available |

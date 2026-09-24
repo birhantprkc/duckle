@@ -581,6 +581,7 @@ export const PALETTE: Category[] = [
                 label: 'SaaS Connectors',
                 components: [
                     snk('salesforce', 'Salesforce', 'available', 'Write rows into a Salesforce object via the REST sObject Collections API (<=200 records/request). insert / update / upsert (by external Id) / delete; auth is a Bearer token or OAuth 2.0 client-credentials (a fresh token minted per run from a connected app). For migration-scale loads use Salesforce Bulk.'),
+                    snk('sharepoint', 'SharePoint Server', 'available', 'SharePoint Server on premises over REST, signed in with Windows authentication (NTLM). Rows become list items, or the output uploads as a document library file (CSV, TSV, Parquet, JSON, Excel). An upstream with no rows changes nothing.'),
                     snk('salesforce.bulk', 'Salesforce Bulk', 'available', 'Write rows into a Salesforce object via Bulk API 2.0 - the migration-scale path. DuckDB streams the upstream to CSV on disk and each <=90MB part runs as an async job (insert / update / upsert / delete / hardDelete). Same Bearer / OAuth client-credentials auth as Salesforce. Result sets are written to an optional Results directory.'),
                 ],
             },
@@ -857,6 +858,7 @@ export const PALETTE: Category[] = [
                     src('asana', 'Asana', 'available', 'Asana REST. Bearer Personal Access Token (https://app.asana.com/0/my-apps). Cursor pagination on `next_page.offset` (cursorNextPath /next_page/offset, cursorParam `offset`). responsePath /data. Base URL https://app.asana.com/api/1.0.'),
                     src('trello', 'Trello', 'available', 'Trello REST. Anonymous-style auth: append `?key={apiKey}&token={token}` to the URL. No body, no pagination (the API returns full result sets by default). Set responsePath empty since responses are top-level arrays. Base URL https://api.trello.com/1.'),
                     src('clickup', 'ClickUp', 'available', 'ClickUp REST. Bearer Personal API token (pk_... from Settings > Apps). Page pagination on `?page=N` (paginationType `page`, pageParam `page`). responsePath /tasks (or whatever resource). Base URL https://api.clickup.com/api/v2.'),
+                    src('sharepoint', 'SharePoint Server', 'available', 'SharePoint Server on premises (2016 / 2019 / Subscription Edition) over REST, signed in with Windows authentication (NTLM). A list reads as rows, every page followed; a document library file reads by its format (CSV, TSV, Parquet, JSON, Excel).'),
                     src('monday', 'Monday.com', 'available', 'Monday.com GraphQL. Rides src.graphql; auth via Bearer token in Authorization header. POST a GraphQL query as `body`; responsePath /data.<query_name>. Base URL https://api.monday.com/v2.'),
                     src('gsheets', 'Google Sheets', 'planned'),
                     src('excel-online', 'Microsoft Excel Online', 'planned'),

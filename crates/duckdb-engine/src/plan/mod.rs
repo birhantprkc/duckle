@@ -444,6 +444,8 @@ pub enum RuntimeSpec {
     Db2Sink(Db2SinkSpec),
     AccessSource(AccessSourceSpec),
     AccessSink(AccessSinkSpec),
+    SharePointSource(SharePointSourceSpec),
+    SharePointSink(SharePointSinkSpec),
     AttachParquetSource(AttachParquetSourceSpec),
     /// materialize = "duckdb"/"duckdbfile": persist the stage into a DuckDB file.
     MaterializeDuckDb(MaterializeDuckDbSpec),
@@ -1999,6 +2001,8 @@ fn build_stage(
     let mut db2_sink: Option<Db2SinkSpec> = None;
     let mut access_source: Option<AccessSourceSpec> = None;
     let mut access_sink: Option<AccessSinkSpec> = None;
+    let mut sharepoint_source: Option<SharePointSourceSpec> = None;
+    let mut sharepoint_sink: Option<SharePointSinkSpec> = None;
     let mut attach_parquet_source: Option<AttachParquetSourceSpec> = None;
     let mut materialize_duckdb: Option<MaterializeDuckDbSpec> = None;
     let mut redis_sink: Option<RedisSinkSpec> = None;
@@ -3645,6 +3649,31 @@ fn build_stage(
             mode: string_prop(&props, "mode")
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "append".to_string()),
+        });
+        (String::new(), StageKind::Sink, Some(from_view.to_string()))
+    } else if component_id == "snk.sharepoint" {
+        let from_view = inputs.main().ok_or_else(|| missing_input(node, "main"))?;
+        let need = |key: &str| {
+            string_prop(&props, key)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| EngineError::Config(format!("{}: {} required", component_id, key)))
+        };
+        let write = if string_prop(&props, "mode").as_deref() == Some("file") {
+            SharePointWrite::File {
+                folder: need("folderUrl")?,
+                name: need("fileName")?,
+                format: string_prop(&props, "format").filter(|s| !s.is_empty()),
+                overwrite: props.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(true),
+            }
+        } else {
+            SharePointWrite::List { list: need("listName")? }
+        };
+        sharepoint_sink = Some(SharePointSinkSpec {
+            from_view: from_view.to_string(),
+            site_url: need("siteUrl")?,
+            username: need("username")?,
+            password: string_prop(&props, "password").unwrap_or_default(),
+            write,
         });
         (String::new(), StageKind::Sink, Some(from_view.to_string()))
     } else if component_id.starts_with("snk.") {
@@ -5733,6 +5762,38 @@ fn build_stage(
             query,
         });
         (String::new(), StageKind::View, None)
+    } else if component_id == "src.sharepoint" {
+        let need = |key: &str| {
+            string_prop(&props, key)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| EngineError::Config(format!("{}: {} required", component_id, key)))
+        };
+        let read = if string_prop(&props, "mode").as_deref() == Some("file") {
+            SharePointRead::File {
+                url: need("fileUrl")?,
+                format: string_prop(&props, "format").filter(|s| !s.is_empty()),
+            }
+        } else {
+            SharePointRead::List {
+                list: need("listName")?,
+                select: string_prop(&props, "select").filter(|s| !s.trim().is_empty()),
+                filter: string_prop(&props, "filter").filter(|s| !s.trim().is_empty()),
+            }
+        };
+        sharepoint_source = Some(SharePointSourceSpec {
+            node_id: node.id.clone(),
+            site_url: need("siteUrl")?,
+            username: need("username")?,
+            password: string_prop(&props, "password").unwrap_or_default(),
+            read,
+            page_size: props
+                .get("pageSize")
+                .and_then(|v| v.as_u64())
+                .filter(|n| *n > 0)
+                .unwrap_or(1000)
+                .min(5000),
+        });
+        (String::new(), StageKind::View, None)
     } else if component_id == "src.access" {
         let query = string_prop(&props, "query").filter(|s| !s.trim().is_empty());
         let table = string_prop(&props, "tableName").filter(|s| !s.trim().is_empty());
@@ -7129,6 +7190,8 @@ fn build_stage(
         .or_else(|| db2_sink.map(RuntimeSpec::Db2Sink))
         .or_else(|| access_source.map(RuntimeSpec::AccessSource))
         .or_else(|| access_sink.map(RuntimeSpec::AccessSink))
+        .or_else(|| sharepoint_source.map(RuntimeSpec::SharePointSource))
+        .or_else(|| sharepoint_sink.map(RuntimeSpec::SharePointSink))
         .or_else(|| attach_parquet_source.map(RuntimeSpec::AttachParquetSource))
         .or_else(|| materialize_duckdb.map(RuntimeSpec::MaterializeDuckDb))
         .or_else(|| redis_sink.map(RuntimeSpec::RedisSink))
