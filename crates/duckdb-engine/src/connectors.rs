@@ -3786,10 +3786,25 @@ impl DuckdbEngine {
         let mut conn = database
             .new_connection()
             .map_err(|e| EngineError::Query(format!("adbc: connect: {}", e)))?;
+        // #364: ClickHouse's Arrow export sends DateTime as UInt32 seconds, Enum
+        // as its code, IPv4 as a number and UUID / FixedString / 128- and
+        // 256-bit integers as raw bytes, so the Schema and Preview tabs showed
+        // numbers and bytes. Asked for the query's column types on this same
+        // connection, ClickHouse casts those columns itself before sending them.
+        // Anything that goes wrong here leaves the query exactly as written.
+        let is_clickhouse = spec.entrypoint.as_deref() == Some("AdbcClickhouseInit")
+            || spec.driver.to_lowercase().contains("clickhouse");
+        let query = if is_clickhouse {
+            clickhouse_described(&mut conn, &spec.query)
+                .and_then(|cols| clickhouse_arrow_query(&spec.query, &cols))
+                .unwrap_or_else(|| spec.query.clone())
+        } else {
+            spec.query.clone()
+        };
         let mut stmt = conn
             .new_statement()
             .map_err(|e| EngineError::Query(format!("adbc: statement: {}", e)))?;
-        stmt.set_sql_query(&spec.query)
+        stmt.set_sql_query(&query)
             .map_err(|e| EngineError::Query(format!("adbc: set query: {}", e)))?;
         let reader = stmt
             .execute()
@@ -19279,6 +19294,145 @@ fn odbc_type_to_duckdb(dt: &odbc_api::DataType) -> Option<String> {
         D::Time { .. } => Some("TIME".into()),
         D::Timestamp { .. } => Some("TIMESTAMP".into()),
         _ => None,
+    }
+}
+
+/// #364: the ClickHouse expression that sends `column` as what it is, given
+/// the type ClickHouse's DESCRIBE reports for it. None leaves the column as
+/// ClickHouse's Arrow export sends it.
+fn clickhouse_arrow_cast(column: &str, ch_type: &str) -> Option<String> {
+    // Nullable(...) and LowCardinality(...) wrap the type without changing what
+    // Arrow does with it, and a NULL stays NULL through both casts below.
+    let mut t = ch_type.trim();
+    loop {
+        let inner = ["Nullable(", "LowCardinality("]
+            .iter()
+            .find_map(|w| t.strip_prefix(w).and_then(|r| r.strip_suffix(')')));
+        match inner {
+            Some(i) => t = i.trim(),
+            None => break,
+        }
+    }
+    let q = format!("`{}`", column.replace('\\', "\\\\").replace('`', "\\`"));
+    // DateTime reaches Arrow as UInt32 seconds; DateTime64 as a real timestamp.
+    // Milliseconds, not seconds: Parquet has no seconds unit, so a seconds
+    // timestamp is written as a bare integer and reads back as BIGINT. A
+    // DateTime is whole seconds, so milliseconds hold it exactly. Its own time
+    // zone, when it has one, is kept.
+    if t == "DateTime" {
+        return Some(format!("toDateTime64({}, 3)", q));
+    }
+    if let Some(tz) = t.strip_prefix("DateTime(").and_then(|r| r.strip_suffix(')')) {
+        return Some(format!("toDateTime64({}, 3, {})", q, tz.trim()));
+    }
+    let text = matches!(t, "UUID" | "IPv4" | "IPv6" | "Int128" | "UInt128" | "Int256" | "UInt256")
+        || ["Enum8(", "Enum16(", "Enum(", "FixedString("].iter().any(|p| t.starts_with(p));
+    text.then(|| format!("toString({})", q))
+}
+
+/// #364: each result column's name and ClickHouse type, from `DESCRIBE` over
+/// the same connection. None when ClickHouse will not describe the query.
+fn clickhouse_described(conn: &mut impl adbc_core::Connection, query: &str) -> Option<Vec<(String, String)>> {
+    use adbc_core::Statement;
+    use arrow_array::cast::AsArray;
+    let mut stmt = conn.new_statement().ok()?;
+    stmt.set_sql_query(&format!("DESCRIBE TABLE ({})", clickhouse_inner(query))).ok()?;
+    let reader = stmt.execute().ok()?;
+    // A column arrives as text, or as bytes with output_string_as_string off.
+    let text = |col: &dyn arrow_array::Array, i: usize| -> Option<String> {
+        if let Some(a) = col.as_string_opt::<i32>() {
+            return Some(a.value(i).to_string());
+        }
+        col.as_binary_opt::<i32>().map(|a| String::from_utf8_lossy(a.value(i)).into_owned())
+    };
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.ok()?;
+        let (names, types) = (batch.column_by_name("name")?, batch.column_by_name("type")?);
+        for i in 0..batch.num_rows() {
+            out.push((text(names.as_ref(), i)?, text(types.as_ref(), i)?));
+        }
+    }
+    Some(out)
+}
+
+/// #364: `query` with the columns that need it cast by ClickHouse, or None
+/// when none do. `SELECT * REPLACE` keeps every name and the column order.
+fn clickhouse_arrow_query(query: &str, columns: &[(String, String)]) -> Option<String> {
+    let casts: Vec<String> = columns
+        .iter()
+        .filter_map(|(name, ty)| {
+            let q = format!("`{}`", name.replace('\\', "\\\\").replace('`', "\\`"));
+            clickhouse_arrow_cast(name, ty).map(|e| format!("{} AS {}", e, q))
+        })
+        .collect();
+    if casts.is_empty() {
+        return None;
+    }
+    Some(format!("SELECT * REPLACE ({}) FROM ({})", casts.join(", "), clickhouse_inner(query)))
+}
+
+/// A query ready to sit inside parentheses: a trailing `;` would end it early.
+fn clickhouse_inner(query: &str) -> &str {
+    query.trim().trim_end_matches(';').trim_end()
+}
+
+#[cfg(test)]
+mod clickhouse_arrow_tests {
+    use super::{clickhouse_arrow_cast, clickhouse_arrow_query};
+
+    /// ClickHouse's Arrow export sends these as a number, a code or raw bytes
+    /// (DateTime as UInt32 seconds, Enum as its Int8 code, IPv4 as UInt32,
+    /// UUID / FixedString / 128- and 256-bit integers as fixed-size binary), so
+    /// each is cast in ClickHouse to a type Arrow carries faithfully.
+    #[test]
+    fn the_types_clickhouse_flattens_are_cast_to_what_they_are() {
+        let cast = |t: &str| clickhouse_arrow_cast("c", t);
+        assert_eq!(cast("DateTime").as_deref(), Some("toDateTime64(`c`, 3)"));
+        assert_eq!(cast("Nullable(DateTime)").as_deref(), Some("toDateTime64(`c`, 3)"));
+        assert_eq!(
+            cast("DateTime('Asia/Kolkata')").as_deref(),
+            Some("toDateTime64(`c`, 3, 'Asia/Kolkata')"),
+            "the column's own time zone is kept"
+        );
+        for t in [
+            "UUID", "IPv4", "IPv6", "Enum8('a' = 1, 'b' = 2)", "Enum16('x' = 300)", "FixedString(3)",
+            "Int128", "UInt128", "Int256", "UInt256", "Nullable(UUID)", "LowCardinality(FixedString(2))",
+        ] {
+            assert_eq!(cast(t).as_deref(), Some("toString(`c`)"), "{t}");
+        }
+    }
+
+    /// What Arrow already carries is left alone.
+    #[test]
+    fn a_type_arrow_carries_is_not_touched() {
+        for t in [
+            "String", "LowCardinality(Nullable(String))", "UInt64", "Int32", "Float64", "Decimal(18, 2)",
+            "Date", "Date32", "DateTime64(3)", "DateTime64(3, 'UTC')", "Bool", "Array(String)",
+            "Map(String, UInt32)", "Tuple(a String, b UInt8)",
+        ] {
+            assert_eq!(clickhouse_arrow_cast("c", t), None, "{t}");
+        }
+    }
+
+    /// Names and order stay as the query had them; a trailing `;` would end
+    /// the wrapped query early, so it goes; a name is quoted for ClickHouse.
+    #[test]
+    fn the_query_is_wrapped_only_when_a_column_needs_it() {
+        let cols = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>();
+        assert_eq!(
+            clickhouse_arrow_query(
+                "SELECT * FROM ch_tb LIMIT 5; ",
+                &cols(&[("id", "UInt64"), ("ts", "DateTime"), ("u", "UUID")])
+            )
+            .as_deref(),
+            Some("SELECT * REPLACE (toDateTime64(`ts`, 3) AS `ts`, toString(`u`) AS `u`) FROM (SELECT * FROM ch_tb LIMIT 5)")
+        );
+        assert_eq!(clickhouse_arrow_query("SELECT 1", &cols(&[("x", "UInt8")])), None);
+        assert_eq!(
+            clickhouse_arrow_cast("we`ird", "UUID").as_deref(),
+            Some("toString(`we\\`ird`)")
+        );
     }
 }
 
