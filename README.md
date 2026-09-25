@@ -46,6 +46,7 @@
 
 - [Where Duckle runs](#where-duckle-runs)
 - [What is Duckle?](#what-is-duckle)
+- [What's new in v0.7.4](#whats-new-in-v074)
 - [What's new in v0.7.3](#whats-new-in-v073)
 - [What's new in v0.7.2](#whats-new-in-v072)
 - [What's new in v0.7.1](#whats-new-in-v071)
@@ -207,7 +208,7 @@ That's a real, native ETL pipeline built and run in under a minute. CSV is just 
 
 ## Download / Install
 
-Pick the binary for your OS from the [latest release](https://github.com/slothflowlabs/duckle/releases/tag/v0.7.3):
+Pick the binary for your OS from the [latest release](https://github.com/slothflowlabs/duckle/releases/tag/v0.7.4):
 
 | OS | Asset | How to run |
 |---|---|---|
@@ -4487,6 +4488,58 @@ gh release edit vX.Y.Z --draft=false --latest
 ```
 
 ---
+
+## What's new in v0.7.4
+
+152 commits. **It carries the fix for a published advisory**: the serve console
+built its buttons' click handlers with HTML escaping alone, and the browser
+decodes that before the handler runs, so a pipeline id containing a quote ran as
+script when its row was clicked (GHSA-6xvv-58mg-4gxx, medium). Upgrade before
+running a console whose pipeline files someone else can name.
+
+- **New connectors.** Microsoft Access as a source and a sink: ODBC on Windows,
+  read-only through mdbtools on Linux and macOS. SharePoint Server lists and
+  document libraries as a source and a sink, signing in with NTLM.
+  Log-based change data capture from PostgreSQL through its built-in pgoutput
+  plugin, with nothing to install on the server. A Delta Lake sink that appends
+  to a local table and creates it on first use. The Iceberg source and sink
+  attach a REST catalog (Polaris, Lakekeeper, Nessie, Gravitino) by URI and
+  warehouse.
+- **New ways to build and run.** Paste a SELECT and get a pipeline, one step per
+  CTE. `duckle-runner nightly.json --param name=value` supplies a pipeline's
+  typed parameters from the command line, through the same check as every other
+  surface. A child job can take its caller's rows as well as hand rows back, so
+  a child pipeline is a reusable rows-in, rows-out block. `maxRunSeconds` stops a
+  hung run and reports it as a failure. `duckle-runner test --update-golden`
+  records what a node produced as its new expected rows. S3 and Azure can read
+  with the identity the run already has, no key (`cloudAuth: environment`).
+- **Operations.** A PagerDuty alert rule triggers an incident on a failure and
+  resolves the same incident on the all-clear. `/readyz` and `/metrics` report a
+  stalled scheduler, which used to look exactly like a night with nothing due.
+  Run history records each node's duration and rows. Every error-type reject
+  carries a machine-readable envelope naming the node and the reason, and a
+  quality check says how many rows it rejected even when its reject port is not
+  wired. `duckle-runner review` speaks json, junit and sarif like the other
+  gates.
+- **Green runs that lost data.** A truncate-mode database sink emptied its
+  target when nothing arrived, and a MongoDB replace dropped the collection and
+  its indexes; an empty input now leaves the target alone. A single-file sink
+  publishes by rename, so a glob downstream no longer reads a killed run's
+  half-written staging file (measured at 10.5M rows where 8M existed). Two runs
+  of one pipeline finishing together could replace its whole history with one
+  record; the append is locked now.
+- **SQL Server.** Date and time columns keep the type SQL Server reports (#362).
+  A saved connection reaches every surface, Plan and Autodetect included (#363).
+  An upsert goes through MERGE instead of failing with "requires a table with a
+  primary key" on the default bulk path.
+- **Also fixed.** ClickHouse through ADBC shows dates, UUIDs, enums and wide
+  integers as what they are rather than numbers and bytes (#364). The desktop
+  window opens on Wayland without XWayland (#361). A `passphrase` typed on a node
+  is now redacted from a `duckle-runner build` bundle, which had shipped it as
+  typed. DuckDB moves to 1.5.5, which fixes an intermittent "Overflow in
+  timestamp subtraction" on HTTP sources. "Log row count" does what it says. In
+  the web editor, Stop, Schedules, History, Backfill and the Data Catalog work
+  against the server.
 
 ## What's new in v0.7.3
 
