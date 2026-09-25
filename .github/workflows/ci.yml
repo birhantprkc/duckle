@@ -495,6 +495,46 @@ jobs:
           DUCKLE_MYSQL_PASS: mytest
         run: cargo test -p duckle-duckdb-engine --test execution -- mysql_
 
+  # Live SQL Server tests: date/time typing (#362) and the sink's upserts. They
+  # skipped everywhere else, which is how the default bulk path broke every
+  # upsert without a test going red.
+  sqlserver-integration:
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: 'Y'
+          MSSQL_SA_PASSWORD: 'Duckle!Passw0rd'
+        ports: ['1433:1433']
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Duckle!Passw0rd' -Q 'SELECT 1' -b"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install DuckDB CLI
+        run: |
+          set -e
+          curl -L -o duckdb.zip https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          unzip -o duckdb.zip -d "$RUNNER_TEMP/duckdb"
+          echo "DUCKLE_DUCKDB_BIN=$RUNNER_TEMP/duckdb/duckdb" >> "$GITHUB_ENV"
+      - name: Pre-install mssql extension
+        run: |
+          "$DUCKLE_DUCKDB_BIN" :memory: -c "INSTALL mssql FROM community;"
+      - name: Run SQL Server integration tests
+        env:
+          DUCKLE_MSSQL_HOST: 127.0.0.1
+          DUCKLE_MSSQL_PORT: '1433'
+          DUCKLE_MSSQL_PASS: 'Duckle!Passw0rd'
+        run: |
+          cargo test -p duckle-duckdb-engine --test execution -- sqlserver_
+          cargo test -p duckle-duckdb-engine --test sqlserver_types
+
   # Live MinIO integration tests (covers all S3-compatible: MinIO, R2, B2).
   # MinIO needs `server /data` as the container command; GitHub Actions
   # service containers can't override CMD, so we run it as a step.
