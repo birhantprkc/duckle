@@ -33817,7 +33817,7 @@
                 "label": "Bulk write (fast)",
                 "kind": "bool",
                 "defaultValue": true,
-                "description": "Fast bulk load via the DuckDB mssql extension (TDS COPY, ~1.2M rows/s). Turn off to use the row-by-row driver (works fully offline; no extension fetch)."
+                "description": "Fast bulk load via the DuckDB mssql extension (TDS COPY, ~1.2M rows/s) for append and overwrite. An upsert always goes through the driver as one MERGE, because the extension cannot update a table that has no primary key. Turn off to use the row-by-row driver for every write (works fully offline; no extension fetch)."
               }
             ]
           },
@@ -36415,7 +36415,7 @@
                 "label": "Bulk write (fast)",
                 "kind": "bool",
                 "defaultValue": true,
-                "description": "Fast bulk load via the DuckDB mssql extension (TDS COPY, ~1.2M rows/s). Turn off to use the row-by-row driver (works fully offline; no extension fetch)."
+                "description": "Fast bulk load via the DuckDB mssql extension (TDS COPY, ~1.2M rows/s) for append and overwrite. An upsert always goes through the driver as one MERGE, because the extension cannot update a table that has no primary key. Turn off to use the row-by-row driver for every write (works fully offline; no extension fetch)."
               }
             ]
           },

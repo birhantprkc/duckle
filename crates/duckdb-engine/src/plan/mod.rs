@@ -2561,13 +2561,19 @@ fn build_stage(
         });
         (String::new(), StageKind::Sink, Some(from_view.to_string()))
     } else if (component_id == "snk.sqlserver" || component_id == "snk.synapse")
-        && !props.get("bulk").and_then(|v| v.as_bool()).unwrap_or(true)
+        && (!props.get("bulk").and_then(|v| v.as_bool()).unwrap_or(true)
+            || string_prop(&props, "mode").as_deref() == Some("upsert"))
     {
         // bulk=false: the row-by-row tiberius driver path (works offline, no
         // extension). The DEFAULT (bulk=true, #86) instead falls through to the
         // generic attach-sink path below, which ATTACHes via the DuckDB mssql
         // community extension and bulk-writes through COPY/INSERT (~1.2M rows/s).
         // Synapse rides the SQL Server wire; same tiberius path.
+        //
+        // An upsert always comes here. Through the mssql extension it is an
+        // UPDATE and a DELETE, which that extension refuses on a table with no
+        // primary key - and a table this sink created has none, so every upsert
+        // on the default path failed. The driver upserts with one MERGE.
         let from_view = inputs.main().ok_or_else(|| missing_input(node, "main"))?;
         let host = string_prop(&props, "host")
             .filter(|s| !s.is_empty())

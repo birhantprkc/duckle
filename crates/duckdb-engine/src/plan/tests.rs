@@ -944,6 +944,39 @@
     }
 
     #[test]
+    fn sqlserver_upsert_goes_through_merge_even_when_bulk() {
+        // The bulk path writes through the DuckDB mssql extension, whose UPDATE
+        // and DELETE need a primary key on the target, and a table the sink
+        // created has none - so every upsert on the default path failed "MSSQL:
+        // UPDATE/DELETE requires a table with a primary key". The driver path
+        // upserts with one MERGE and needs no key, which is what the form and the
+        // README promise. Plain writes keep the bulk path.
+        let mk = |extra: &str| pipeline_from_json(&format!(
+            r#"{{"nodes":[
+                {{"id":"s","position":{{"x":0,"y":0}},"data":{{"label":"S","componentId":"src.csv","properties":{{"path":"/tmp/in.csv"}}}}}},
+                {{"id":"k","position":{{"x":0,"y":0}},"data":{{"label":"M","componentId":"snk.sqlserver","properties":{{"host":"h","database":"db","user":"u","password":"p","tableName":"t"{}}}}}}}
+              ],"edges":[{{"id":"e1","source":"s","target":"k","data":{{"connectionType":"main"}}}}]}}"#, extra));
+        // Whether the sink runs on the tiberius driver (MERGE), not the bulk path.
+        let on_driver = |extra: &str| {
+            let c = compile(&mk(extra)).unwrap();
+            matches!(
+                c.stages.iter().find(|s| s.node_id == "k").unwrap().runtime.as_ref(),
+                Some(RuntimeSpec::SqlserverSink(_))
+            )
+        };
+        for extra in [
+            r#","mode":"upsert","conflictColumns":["id"]"#,
+            r#","mode":"upsert","conflictColumns":["id"],"deleteColumn":"op""#,
+            r#","mode":"upsert","conflictColumns":["id"],"bulk":true"#,
+        ] {
+            assert!(on_driver(extra), "upsert takes the MERGE driver: {extra}");
+        }
+        for extra in [r#","mode":"append""#, r#","mode":"overwrite""#, ""] {
+            assert!(!on_driver(extra), "a plain write stays on the bulk path: {extra}");
+        }
+    }
+
+    #[test]
     fn sqlserver_bulk_honours_trust_and_batch() {
         // #86 follow-up: trustCert + batchSize now apply to the bulk (mssql
         // extension) path, not only the legacy driver.
